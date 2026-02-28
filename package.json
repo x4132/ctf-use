@@ -1,0 +1,25 @@
+{
+  "name": "hacker-use",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hacker Use monorepo",
+  "scripts": {
+    "backend:dev": "bun --watch backend/src/index.ts",
+    "backend:start": "bun backend/src/index.ts",
+    "backend:typecheck": "bunx tsc -p backend/tsconfig.json --noEmit",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "packageManager": "pnpm@10.11.0",
+  "dependencies": {
+    "@hono/trpc-server": "^0.4.2",
+    "@trpc/server": "^11.10.0",
+    "ai": "^6.0.105",
+    "browser-use-sdk": "^3.1.0",
+    "hono": "^4.12.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.11.0",
+    "typescript": "^5.9.3"
+  }
+}
