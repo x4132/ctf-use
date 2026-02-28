@@ -67,3 +67,5 @@ Always use Context7 MCP when I need library/API documentation, code generation, 
 When you make a mistake or learn something important during a session, update CLAUDE.md with the lesson so you don't repeat it in future sessions.
 
 ### Lessons Learned
+
+- In `frontend/`, `pnpm exec tsc` can pass without checking app sources because `tsconfig.json` is solution-style with empty `files` and project references. Use `pnpm exec tsc -p tsconfig.app.json` to validate frontend source files directly.
