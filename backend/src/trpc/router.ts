@@ -62,6 +62,34 @@ const browserRouter = t.router({
     }),
 })
 
+function extractUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/[^\s]+/)
+  return match ? match[0] : null
+}
+
+const chatRouter = t.router({
+  send: t.procedure
+    .input(
+      z.object({
+        message: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      const url = extractUrl(input.message)
+
+      // TODO: Replace with actual LLM call
+      const content = url
+        ? `Received target URL: ${url}. I'll analyze this for web exploitation vulnerabilities. (Placeholder — LLM integration coming soon.)`
+        : `Please provide a URL for me to analyze. (Placeholder response.)`
+
+      return {
+        id: crypto.randomUUID(),
+        role: 'assistant' as const,
+        content,
+      }
+    }),
+})
+
 export const appRouter = t.router({
   health: t.procedure.query(() => ({
     status: 'ok',
@@ -79,6 +107,7 @@ export const appRouter = t.router({
       message: `Hello ${input?.name ?? 'world'}!`,
     })),
   browser: browserRouter,
+  chat: chatRouter,
 })
 
 export type AppRouter = typeof appRouter

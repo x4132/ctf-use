@@ -1,7 +1,7 @@
-import { ComponentExample } from "@/components/component-example";
+import { ChatPage } from "@/components/chat-page"
 
 export function App() {
-return <ComponentExample />;
+  return <ChatPage />
 }
 
-export default App;
+export default App

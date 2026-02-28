@@ -4,6 +4,8 @@
   "private": true,
   "description": "Hacker Use monorepo",
   "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green \"pnpm run backend:dev\" \"pnpm --filter hacker-use-frontend dev\"",
+    "start": "concurrently -n backend,frontend -c blue,green \"pnpm run backend:start\" \"pnpm --filter hacker-use-frontend preview\"",
     "backend:dev": "bun --watch backend/src/index.ts",
     "backend:start": "bun backend/src/index.ts",
     "backend:typecheck": "bunx tsc -p backend/tsconfig.json --noEmit",
@@ -13,8 +15,9 @@
   "dependencies": {
     "@hono/trpc-server": "^0.4.2",
     "@trpc/server": "^11.10.0",
-    "ai": "^6.0.105",
     "browser-use-sdk": "^3.1.0",
+    "concurrently": "^9.2.1",
+    "dedalus-labs": "0.1.0-alpha.8",
     "hono": "^4.12.3",
     "zod": "^4.3.6"
   },
