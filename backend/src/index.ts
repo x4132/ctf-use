@@ -2,7 +2,13 @@ import { trpcServer } from '@hono/trpc-server'
 import { Hono } from 'hono'
 import { appRouter } from './trpc/router'
 
-const app = new Hono()
+type HonoEnv = {
+  Variables: {
+    requestId: string
+  }
+}
+
+const app = new Hono<HonoEnv>()
 
 type BunRuntime = {
   serve(options: {
@@ -10,6 +16,18 @@ type BunRuntime = {
     port: number
   }): { port: number }
 }
+
+// HTTP request logging middleware
+app.use('*', async (c, next) => {
+  const start = performance.now()
+  const requestId = crypto.randomUUID()
+  c.set('requestId', requestId)
+
+  await next()
+
+  const durationMs = Math.round(performance.now() - start)
+  console.log(`${c.req.method} ${c.req.path} ${c.res.status} ${durationMs}ms`)
+})
 
 app.get('/', (c) =>
   c.json({
@@ -40,4 +58,4 @@ const server = bunRuntime.serve({
   port,
 })
 
-console.log(`Backend listening on http://localhost:${server.port}`)
+console.log(`Backend listening on port ${server.port}`)

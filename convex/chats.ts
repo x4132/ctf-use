@@ -26,19 +26,6 @@ export const create = mutation({
   },
 });
 
-export const updateTargetUrl = mutation({
-  args: {
-    chatId: v.id("chats"),
-    targetUrl: v.string(),
-  },
-  handler: async (ctx, args) => {
-    await ctx.db.patch(args.chatId, {
-      targetUrl: args.targetUrl,
-      updatedAt: Date.now(),
-    });
-  },
-});
-
 export const rename = mutation({
   args: {
     chatId: v.id("chats"),
@@ -53,6 +40,30 @@ export const rename = mutation({
   },
 });
 
+export const get = query({
+  args: {
+    chatId: v.id("chats"),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.chatId);
+  },
+});
+
+export const setSandboxId = mutation({
+  args: {
+    chatId: v.id("chats"),
+    sandboxId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+    await ctx.db.patch(args.chatId, {
+      sandboxId: args.sandboxId,
+      updatedAt: Date.now(),
+    });
+  },
+});
+
 export const remove = mutation({
   args: {
     chatId: v.id("chats"),
@@ -62,15 +73,8 @@ export const remove = mutation({
       .query("chatMessages")
       .withIndex("by_chatId_createdAt", (q) => q.eq("chatId", args.chatId))
       .collect();
-    const investigations = await ctx.db
-      .query("investigations")
-      .withIndex("by_chatId", (q) => q.eq("chatId", args.chatId))
-      .collect();
 
-    await Promise.all([
-      ...messages.map((message) => ctx.db.delete(message._id)),
-      ...investigations.map((inv) => ctx.db.delete(inv._id)),
-    ]);
+    await Promise.all(messages.map((message) => ctx.db.delete(message._id)));
     await ctx.db.delete(args.chatId);
   },
 });

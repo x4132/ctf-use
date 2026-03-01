@@ -47,3 +47,38 @@ export const create = mutation({
     return insertedId;
   },
 });
+
+export const deleteAfter = mutation({
+  args: {
+    chatId: v.id("chats"),
+    afterCreatedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const messages = await ctx.db
+      .query("chatMessages")
+      .withIndex("by_chatId_createdAt", (q) => q.eq("chatId", args.chatId))
+      .collect();
+
+    const toDelete = messages.filter((m) => m.createdAt > args.afterCreatedAt);
+    await Promise.all(toDelete.map((m) => ctx.db.delete(m._id)));
+  },
+});
+
+export const updateContent = mutation({
+  args: {
+    messageId: v.id("chatMessages"),
+    content: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.messageId, { content: args.content });
+  },
+});
+
+export const deleteById = mutation({
+  args: {
+    messageId: v.id("chatMessages"),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.delete(args.messageId);
+  },
+});

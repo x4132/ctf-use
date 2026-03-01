@@ -1,3 +1,4 @@
+/// <reference path="./node.d.ts" />
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../../convex/_generated/api.js";
 
@@ -10,6 +11,7 @@ export function getConvexClient(): ConvexHttpClient {
       throw new Error("CONVEX_URL environment variable is required");
     }
     client = new ConvexHttpClient(url);
+    console.log("Convex client initialized");
   }
   return client;
 }

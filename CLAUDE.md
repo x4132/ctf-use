@@ -4,14 +4,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-hacker-use is an AI agent built to automatically solve Web Exploitation CTF challenges. It consists of a monorepo with a backend API server and a React frontend.
+hacker-use is an AI agent built to automatically solve Web Exploitation CTF challenges. It consists of a monorepo with a backend API server, a React frontend, and a Convex real-time database.
 
 ## Architecture
 
-- **Monorepo** managed with pnpm (v10.11.0) from the root `package.json`
-- **Backend** (`backend/`): Hono HTTP server with tRPC router, run via Bun. Listens on port 3001 by default (configurable via `PORT` env var). Uses Vercel AI SDK (`ai` package) for agent capabilities.
+- **Monorepo** managed with pnpm (v10.11.0) from the root `package.json`. Only `frontend/` is a workspace package; backend dependencies live at root.
+- **Backend** (`backend/`): Hono HTTP server with tRPC router, run via **Bun** (not Node). Listens on port 3001 by default (configurable via `PORT` env var).
 - **Frontend** (`frontend/`): React 19 + Vite 7 + TypeScript. Uses Tailwind CSS v4 (via `@tailwindcss/vite` plugin), shadcn/ui components (base-vega style, Base UI primitives), and lucide-react icons. Path alias `@/` maps to `src/`.
-- **Communication**: Frontend will consume backend via tRPC. The `AppRouter` type is exported from `backend/src/trpc/router.ts` for end-to-end type safety.
+- **Convex** (`convex/`): Real-time backend-as-a-service for persisting chats and messages. Frontend subscribes reactively; backend writes via HTTP client.
+- **Communication**: Frontend calls backend via tRPC (proxied through Vite at `/trpc` in dev). `AppRouter` type is exported from `backend/src/trpc/router.ts` for end-to-end type safety.
+
+### Agent Pipeline
+
+When a user sends a message, the backend orchestrates:
+
+1. **Sandbox** (`backend/src/agent/sandbox.ts`): Provisions a Daytona cloud sandbox (Linux, 2 CPU / 4GB RAM) with OpenCode AI installed. Writes CTF rules (`system-prompt.ts`) into the sandbox. Persists sandbox ID to Convex for reconnection across restarts.
+2. **Session** (`backend/src/agent/session.ts`): Creates an OpenCode session in the sandbox. Sends prompts and subscribes to SSE event stream for responses.
+3. **Results**: Text parts and tool execution statuses are streamed incrementally to Convex as `chatMessages`. The frontend reactively displays them.
+
+In-memory `Map<chatId, ChatSession>` tracks active sandbox+session pairs. Sessions auto-reconnect to persisted sandboxes on backend restart.
+
+### OpenCode API
+
+**Read [`OPENCODE_API.md`](./OPENCODE_API.md) before modifying any OpenCode integration code.** It contains the full OpenCode server API reference (events, sessions, messages, parts). Key points:
+
+- `message.updated` events fire for **both** user and assistant messages — check `info.role`
+- Every part (`message.part.updated`) has a `messageID` linking it to its parent message
+- `TextPart.text` is the full accumulated text, not a delta
+- The `/event` endpoint returns unwrapped `Event` objects; `/global/event` wraps them in `GlobalEvent`
 
 ## Commands
 
@@ -19,7 +39,10 @@ hacker-use is an AI agent built to automatically solve Web Exploitation CTF chal
 # Install dependencies (from root)
 pnpm install
 
-# Backend
+# Development (both backend + frontend concurrently)
+pnpm dev
+
+# Backend only
 pnpm backend:dev          # dev server with hot reload (bun --watch)
 pnpm backend:start        # production start
 bunx tsc -p backend/tsconfig.json --noEmit  # type-check backend only
@@ -29,20 +52,57 @@ pnpm dev                  # vite dev server
 pnpm build                # typecheck + vite build
 pnpm lint                 # eslint
 pnpm preview              # preview production build
+
+# Type-check everything
+pnpm typecheck            # checks both backend and frontend
+
+# Frontend type-check (app sources only)
+pnpm exec tsc -p tsconfig.app.json   # from frontend/
+
+# Convex
+npx convex dev            # start Convex dev server (syncs schema + functions)
+
+# Add shadcn/ui components (from frontend/)
+pnpm dlx shadcn@latest add <component>
 ```
 
 ## Key Files
 
 - `backend/src/index.ts` — Hono server entry, mounts tRPC at `/trpc/*`
-- `backend/src/trpc/router.ts` — tRPC router definition and `AppRouter` type export
-- `frontend/src/App.tsx` — React app root
+- `backend/src/trpc/router.ts` — tRPC router (`AppRouter` type export), chat session lifecycle
+- `backend/src/agent/sandbox.ts` — Daytona sandbox creation, reconnection, teardown
+- `backend/src/agent/session.ts` — OpenCode session management, SSE event consumption
+- `backend/src/agent/system-prompt.ts` — CTF exploitation rules injected into agent
+- `backend/src/convex.ts` — Convex HTTP client singleton
+- `convex/schema.ts` — Database schema (`chats`, `chatMessages` tables)
+- `convex/chats.ts` — Chat CRUD mutations/queries
+- `convex/messages.ts` — Message CRUD, auto-titles chat from first user message
+- `frontend/src/main.tsx` — Provider setup (Convex, tRPC, React Query)
+- `frontend/src/components/chat-page.tsx` — Main chat UI (sidebar + message thread)
+- `frontend/src/lib/trpc.ts` — tRPC React client creation
 - `frontend/components.json` — shadcn/ui config
+
+## Environment Variables
+
+Required in `.env` (root):
+- `DAYTONA_API_KEY` — Daytona sandbox SDK
+
+Required in `.env.local` (root):
+- `CONVEX_URL` — Convex deployment URL
+- `CONVEX_DEPLOYMENT` — Convex deployment identifier
+
+Optional:
+- `PORT` — Backend port (default 3001)
 
 ## Conventions
 
+- Backend runs on **Bun runtime** — use Bun APIs where applicable
 - Backend TypeScript targets ES2022 with NodeNext module resolution
 - Frontend uses the `cn()` utility from `@/lib/utils` for merging Tailwind classes
-- shadcn/ui components live in `src/components/ui/`; add new ones via `pnpm dlx shadcn@latest add <component>` from the frontend directory
+- Vite proxies `/trpc` to `http://localhost:3001` in dev; frontend reads env from parent dir (`envDir: ".."`)
+- shadcn/ui components live in `src/components/ui/`; AI chat components in `src/components/ai-elements/` (from Vercel AI SDK registry)
+- Convex functions use `v` validator from `convex/values` for schema definitions
+- Frontend subscribes to Convex queries reactively (`useQuery`); backend writes via `ConvexHttpClient`
 
 ## Context7
 
