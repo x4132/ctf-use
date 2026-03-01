@@ -1,6 +1,6 @@
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import { createSandbox, reconnectToSandbox, createOpenCodeSession, resumeOrCreateOpenCodeSession, buildRules, deleteSandboxById, stopSandboxById } from "../agent/index.js";
+import { createSandbox, reconnectToSandbox, createOpenCodeSession, resumeOrCreateOpenCodeSession, buildRules, deleteSandboxById, stopSandboxById, runLoop, abortLoop } from "../agent/index.js";
 import type { SandboxHandle, OpenCodeSession } from "../agent/index.js";
 import { getConvexClient, api } from "../convex.js";
 import type { Id } from "../../../convex/_generated/dataModel.js";
@@ -109,6 +109,8 @@ const chatRouter = t.router({
       z.object({
         chatId: z.string().min(1),
         message: z.string().min(1),
+        loopEnabled: z.optional(z.boolean()),
+        loopMaxIterations: z.optional(z.number().min(1).max(50)),
       }),
     )
     .mutation(async ({ input }) => {
@@ -183,8 +185,26 @@ const chatRouter = t.router({
 
       // Send prompt in background — events stream to Convex inside session.sendMessage()
       chatSession.session.sendMessage(prompt)
-        .then(() => {
-          clearRunning();
+        .then(async () => {
+          // If loop mode, start the iteration loop (iteration 1 just completed)
+          if (input.loopEnabled) {
+            const maxIter = input.loopMaxIterations ?? 10;
+            await convex.mutation(api.chats.setLoopConfig, {
+              chatId,
+              loopEnabled: true,
+              loopMaxIterations: maxIter,
+            });
+            // runLoop handles clearRunning in its finally block
+            await runLoop({
+              chatId: input.chatId,
+              session: chatSession.session,
+              maxIterations: maxIter,
+              setStatus,
+              clearRunning,
+            });
+          } else {
+            clearRunning();
+          }
         })
         .catch(async (err) => {
           console.error(`[${input.chatId}] sendMessage failed:`, err);
@@ -199,16 +219,20 @@ const chatRouter = t.router({
   stop: loggedProcedure
     .input(z.object({ chatId: z.string().min(1) }))
     .mutation(async ({ input }) => {
+      // Abort loop first (prevents next iteration from starting)
+      abortLoop(input.chatId);
+
       const chatSession = chatSessions.get(input.chatId);
       if (chatSession) {
         await chatSession.session.abort();
       }
 
       const convex = getConvexClient();
-      await convex.mutation(api.chats.setIsRunning, {
-        chatId: input.chatId as Id<"chats">,
-        isRunning: false,
-      });
+      const chatId = input.chatId as Id<"chats">;
+      await Promise.all([
+        convex.mutation(api.chats.setIsRunning, { chatId, isRunning: false }),
+        convex.mutation(api.chats.updateLoopProgress, { chatId, loopStatus: "stopped" }),
+      ]);
 
       return { ok: true };
     }),
@@ -219,7 +243,8 @@ const chatRouter = t.router({
       const convex = getConvexClient();
       const chatId = input.chatId as Id<"chats">;
 
-      // Abort OpenCode session if running
+      // Abort loop + OpenCode session if running
+      abortLoop(input.chatId);
       const chatSession = chatSessions.get(input.chatId);
       if (chatSession) {
         try { await chatSession.session.abort(); } catch { /* best-effort */ }
@@ -239,6 +264,7 @@ const chatRouter = t.router({
         convex.mutation(api.chats.setSandboxStopped, { chatId, sandboxStopped: true }),
         convex.mutation(api.chats.setIsRunning, { chatId, isRunning: false }),
         convex.mutation(api.chats.setStatus, { chatId, status: "Sandbox stopped" }),
+        convex.mutation(api.chats.updateLoopProgress, { chatId, loopStatus: "stopped" }),
       ]);
 
       return { ok: true };

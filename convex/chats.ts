@@ -115,6 +115,41 @@ export const setLiveUrl = mutation({
   },
 });
 
+export const setLoopConfig = mutation({
+  args: {
+    chatId: v.id("chats"),
+    loopEnabled: v.boolean(),
+    loopMaxIterations: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+    await ctx.db.patch(args.chatId, {
+      loopEnabled: args.loopEnabled,
+      loopMaxIterations: args.loopMaxIterations ?? 10,
+      updatedAt: Date.now(),
+    });
+  },
+});
+
+export const updateLoopProgress = mutation({
+  args: {
+    chatId: v.id("chats"),
+    loopIteration: v.optional(v.number()),
+    loopStatus: v.optional(v.string()),
+    loopFlagFound: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+    const patch: Record<string, unknown> = { updatedAt: Date.now() };
+    if (args.loopIteration !== undefined) patch.loopIteration = args.loopIteration;
+    if (args.loopStatus !== undefined) patch.loopStatus = args.loopStatus;
+    if (args.loopFlagFound !== undefined) patch.loopFlagFound = args.loopFlagFound;
+    await ctx.db.patch(args.chatId, patch);
+  },
+});
+
 export const remove = mutation({
   args: {
     chatId: v.id("chats"),

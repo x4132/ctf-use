@@ -39,7 +39,7 @@ import type { ToolPart } from "@/components/ai-elements/tool";
 import type { Doc, Id } from "../../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import { Spinner } from "@/components/ui/spinner";
-import { BrainIcon, ChevronDownIcon, Globe, Maximize2, Minimize2, Pause, Play, Square, X } from "lucide-react";
+import { BrainIcon, ChevronDownIcon, Globe, Maximize2, Minimize2, Pause, Play, RefreshCw, Square, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const DEFAULT_CHAT_TITLE = "New chat";
@@ -135,6 +135,8 @@ export function ChatPage() {
   const promptControllerRef = useRef<{ setInput: (v: string) => void } | null>(
     null,
   );
+  const [loopMode, setLoopMode] = useState(false);
+  const [loopMaxIterations, setLoopMaxIterations] = useState(10);
 
   const activeChatId =
     selectedChatId && chatList.some((chat) => chat._id === selectedChatId)
@@ -264,7 +266,12 @@ export function ChatPage() {
     }
 
     // Fire agent in background — backend streams all messages (user + assistant) to Convex via OpenCode events
-    sendMessage.mutateAsync({ chatId, message: text }).catch(console.error);
+    sendMessage.mutateAsync({
+      chatId,
+      message: text,
+      loopEnabled: loopMode || undefined,
+      loopMaxIterations: loopMode ? loopMaxIterations : undefined,
+    }).catch(console.error);
   };
 
   // Group consecutive tool messages with the same toolName
@@ -545,11 +552,31 @@ export function ChatPage() {
           <ConversationScrollButton />
         </Conversation>
 
-        {(selectedChat?.status || selectedChat?.sandboxId) && (
+        {(selectedChat?.status || selectedChat?.sandboxId || selectedChat?.loopStatus) && (
           <div className="flex items-center justify-between border-t border-border px-4 py-2">
-            <p className="text-xs text-muted-foreground">
-              {selectedChat?.status ?? ""}
-            </p>
+            <div className="flex items-center gap-3">
+              <p className="text-xs text-muted-foreground">
+                {selectedChat?.status ?? ""}
+              </p>
+              {selectedChat?.loopEnabled && selectedChat?.loopStatus === "running" && (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <RefreshCw className="size-3 animate-spin" />
+                  <span>
+                    Loop {selectedChat.loopIteration ?? 1}/{selectedChat.loopMaxIterations ?? 10}
+                  </span>
+                </div>
+              )}
+              {selectedChat?.loopStatus === "completed" && selectedChat?.loopFlagFound && (
+                <span className="text-xs font-medium text-green-600">
+                  Flag found: {selectedChat.loopFlagFound}
+                </span>
+              )}
+              {selectedChat?.loopStatus === "max_reached" && (
+                <span className="text-xs text-yellow-600">
+                  Max iterations reached
+                </span>
+              )}
+            </div>
             {selectedChat?.sandboxId && (
               <div className="flex items-center gap-1">
                 {selectedChat?.sandboxStopped ? (
@@ -615,7 +642,31 @@ export function ChatPage() {
                 />
               </PromptInputBody>
               <PromptInputFooter>
-                <div />
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant={loopMode ? "default" : "outline"}
+                    size="xs"
+                    onClick={() => setLoopMode(!loopMode)}
+                    className="gap-1"
+                  >
+                    <RefreshCw className={`size-3 ${loopMode ? "animate-spin" : ""}`} />
+                    Loop
+                  </Button>
+                  {loopMode && (
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <span>max</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={50}
+                        value={loopMaxIterations}
+                        onChange={(e) => setLoopMaxIterations(Math.max(1, Math.min(50, parseInt(e.target.value) || 10)))}
+                        className="w-12 rounded border border-border bg-background px-1 py-0.5 text-center text-xs"
+                      />
+                    </div>
+                  )}
+                </div>
                 <div className="flex items-center gap-1">
                   {selectedChat?.isRunning && (
                     <Button

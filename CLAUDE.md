@@ -74,6 +74,8 @@ echo "n" | npx shadcn@latest add <component>
 - `backend/src/agent/sandbox.ts` — Daytona sandbox creation, reconnection, teardown
 - `backend/src/agent/session.ts` — OpenCode session management, SSE event consumption
 - `backend/src/agent/system-prompt.ts` — CTF exploitation rules injected into agent
+- `backend/src/agent/loop.ts` — Loop mode orchestration (ralph loop pattern for continuous pentesting)
+- `backend/src/agent/flag-detector.ts` — AI-powered flag detection via Dedalus Labs structured output
 - `backend/src/convex.ts` — Convex HTTP client singleton
 - `convex/schema.ts` — Database schema (`chats`, `chatMessages` tables)
 - `convex/chats.ts` — Chat CRUD mutations/queries
@@ -87,6 +89,7 @@ echo "n" | npx shadcn@latest add <component>
 
 Required in `.env` (root):
 - `DAYTONA_API_KEY` — Daytona sandbox SDK
+- `DEDALUS_API_KEY` — Dedalus Labs API (used for AI-powered flag detection in loop mode)
 
 Required in `.env.local` (root):
 - `CONVEX_URL` — Convex deployment URL
