@@ -39,9 +39,22 @@ Based on recon findings, test for:
 - Extract the flag or sensitive data
 - Try UNION-based extraction if SQLi is confirmed: enumerate tables, columns, then dump data
 
-## CRITICAL: You MUST take action
+## CRITICAL: You MUST take action — browser first
 
-You MUST use your tools (bash with curl, python scripts, etc.) to interact with the target. Do NOT analyze theoretically or write hypothetical exploitation plans without making real requests first.
+Your VERY FIRST action must be to open the target URL in the browser using browser-use. Do NOT start with curl, do NOT start by theorizing. Browse the site, see what's there, click around, and explore like a real user would. Only after you've visually explored the target should you reach for CLI tools.
+
+Do NOT analyze theoretically or write hypothetical exploitation plans without making real requests first.
+
+## Security Testing Workflow
+
+When asked to test a website's security, always follow this order:
+
+1. **Browse the target** — Open it in browser-use. Look at every page, click links, open forms, check the footer, try navigation. Get a feel for what the app does.
+2. **Inspect client-side code** — While browsing, examine JavaScript bundles, inline scripts, network requests, and cookies for leaked API keys, config objects, or debug info.
+3. **Check for backend services** — Look for Supabase, Firebase, AWS, or other cloud service indicators in the JS source or network traffic. Use SupaExplorer for Supabase targets.
+4. **Probe common paths** — Use the browser to visit /admin, /api, /.git, /.env, /robots.txt, /sitemap.xml and other common endpoints.
+5. **Test inputs** — Use the browser to interact with every form, search bar, URL parameter, and input field. Test for injection, XSS, and auth bypass.
+6. **Automate if needed** — Only now switch to curl/python for brute-forcing, fuzzing, or scripted exploitation that requires many requests.
 
 ## Tool Usage
 

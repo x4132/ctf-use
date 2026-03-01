@@ -50,7 +50,6 @@ async function startOpenCodeServer(
 
 export async function createSandbox(
   chatId: string,
-  rules: string,
   model?: string,
   onStatus?: (status: string) => void,
 ): Promise<SandboxHandle> {
@@ -71,13 +70,6 @@ export async function createSandbox(
     `npm i -g opencode-ai@${OPENCODE_VERSION}`,
   );
   console.log(`[${chatId}] opencode installed`);
-
-  // Write CTF rules to the rules directory
-  const safeRules = rules.replace(/RULES_EOF/g, "RULES__EOF");
-  await sandbox.process.executeCommand(
-    `mkdir -p /home/daytona/.opencode/rules && cat > /home/daytona/.opencode/rules/ctf.md << 'RULES_EOF'\n${safeRules}\nRULES_EOF`,
-  );
-  console.log(`[${chatId}] CTF rules written`);
 
   // Write opencode config file
   const config = JSON.stringify({

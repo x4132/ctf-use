@@ -70,8 +70,7 @@ async function getOrCreateChatSession(
 
     if (!sandbox) {
       console.log(`[${chatId}] Creating new sandbox`);
-      const rules = buildRules();
-      sandbox = await createSandbox(chatId, rules, undefined, onStatus);
+      sandbox = await createSandbox(chatId, undefined, onStatus);
 
       // Persist sandbox ID so it survives backend restarts
       await convex.mutation(api.chats.setSandboxId, {
@@ -171,8 +170,19 @@ const chatRouter = t.router({
         console.error(`[${input.chatId}] Failed to clear sandboxStopped:`, err);
       });
 
+      // Check if this is the first user message — if so, prepend system prompt
+      const existingMessages = await convex.query(api.messages.listByChat, { chatId });
+      const priorUserMessages = existingMessages.filter(
+        (m) => m.role === "user" && m._id !== undefined,
+      );
+      // Only the message we just created above exists → this is the first prompt
+      const isFirstMessage = priorUserMessages.length <= 1;
+      const prompt = isFirstMessage
+        ? `${buildRules()}\n\n---\n\n${input.message}`
+        : input.message;
+
       // Send prompt in background — events stream to Convex inside session.sendMessage()
-      chatSession.session.sendMessage(input.message)
+      chatSession.session.sendMessage(prompt)
         .then(() => {
           clearRunning();
         })
