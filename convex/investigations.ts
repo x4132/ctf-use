@@ -7,109 +7,92 @@ const investigationStatus = v.union(
   v.literal("failed"),
   v.literal("stopped"),
 );
-const messageKind = v.union(v.literal("message"), v.literal("status"));
 
 export const listRunning = query({
   args: {},
   handler: async (ctx) => {
-    const chats = await ctx.db.query("chats").collect();
-    const running = chats.flatMap((chat) =>
-      (chat.investigations ?? [])
-        .filter((investigation) => investigation.status === "running")
-        .map((investigation) => ({
-          chatId: chat._id,
-          agentId: investigation.agentId,
-          status: investigation.status,
-          lastActivityLine: investigation.lastActivityLine,
-          updatedAt: investigation.updatedAt,
-        })),
-    );
-
-    return running.sort((a, b) => b.updatedAt - a.updatedAt);
+    return await ctx.db
+      .query("investigations")
+      .withIndex("by_status", (q) => q.eq("status", "running"))
+      .collect();
   },
 });
 
-export const upsert = mutation({
+export const listByChatId = query({
+  args: { chatId: v.id("chats") },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("investigations")
+      .withIndex("by_chatId", (q) => q.eq("chatId", args.chatId))
+      .collect();
+  },
+});
+
+export const getByAgentId = query({
+  args: { agentId: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("investigations")
+      .withIndex("by_agentId", (q) => q.eq("agentId", args.agentId))
+      .first();
+  },
+});
+
+export const create = mutation({
   args: {
     chatId: v.id("chats"),
     agentId: v.string(),
-    status: investigationStatus,
-    activity: v.array(v.string()),
-    output: v.optional(v.string()),
-    error: v.optional(v.string()),
-    finalMessage: v.optional(v.string()),
-    finalMessageKind: v.optional(messageKind),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    const chat = await ctx.db.get(args.chatId);
-    if (!chat) {
-      throw new Error("Chat not found");
-    }
-
-    const investigations = [...(chat.investigations ?? [])];
-    const existingIndex = investigations.findIndex(
-      (investigation) => investigation.agentId === args.agentId,
-    );
-    const existing =
-      existingIndex >= 0 ? investigations[existingIndex] : null;
-
-    let newActivity: string[];
-    if (!existing?.lastActivityLine) {
-      newActivity = args.activity;
-    } else {
-      const lastSeenIndex = args.activity.lastIndexOf(existing.lastActivityLine);
-      newActivity = lastSeenIndex >= 0 ? args.activity.slice(lastSeenIndex + 1) : args.activity;
-    }
-
-    await Promise.all(
-      newActivity.map((line, index) =>
-        ctx.db.insert("chatMessages", {
-          chatId: args.chatId,
-          role: "assistant",
-          content: line,
-          kind: "status",
-          createdAt: now + index,
-        }),
-      ),
-    );
-
-    const nextState = {
+    return await ctx.db.insert("investigations", {
+      chatId: args.chatId,
       agentId: args.agentId,
-      status: args.status,
-      lastActivityLine:
-        args.activity.length > 0
-          ? args.activity[args.activity.length - 1]
-          : existing?.lastActivityLine,
-      updatedAt: now,
-    };
-
-    if (existingIndex >= 0) {
-      investigations[existingIndex] = nextState;
-    } else {
-      investigations.push(nextState);
-    }
-
-    const shouldInsertFinalMessage =
-      args.status !== "running" &&
-      Boolean(args.finalMessage?.trim()) &&
-      (!existing || existing.status === "running");
-
-    if (shouldInsertFinalMessage) {
-      await ctx.db.insert("chatMessages", {
-        chatId: args.chatId,
-        role: "assistant",
-        content: args.finalMessage!.trim(),
-        kind: args.finalMessageKind ?? "status",
-        createdAt: now + newActivity.length,
-      });
-    }
-
-    await ctx.db.patch(args.chatId, {
-      investigations,
+      status: "running",
+      createdAt: now,
       updatedAt: now,
     });
+  },
+});
 
-    return args.agentId;
+export const updateState = mutation({
+  args: {
+    agentId: v.string(),
+    status: v.optional(investigationStatus),
+    liveBrowserUrl: v.optional(v.string()),
+    output: v.optional(v.string()),
+    error: v.optional(v.string()),
+    signals: v.optional(
+      v.array(
+        v.object({
+          type: v.string(),
+          confidence: v.string(),
+          details: v.string(),
+          evidence: v.string(),
+          suggestedFollowUps: v.array(v.string()),
+        }),
+      ),
+    ),
+    toolsCalled: v.optional(v.array(v.string())),
+    stepsUsed: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const investigation = await ctx.db
+      .query("investigations")
+      .withIndex("by_agentId", (q) => q.eq("agentId", args.agentId))
+      .first();
+    if (!investigation) {
+      throw new Error(`Investigation not found for agentId: ${args.agentId}`);
+    }
+
+    const { agentId: _, ...updates } = args;
+    const patch: Record<string, unknown> = { updatedAt: Date.now() };
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        patch[key] = value;
+      }
+    }
+
+    await ctx.db.patch(investigation._id, patch);
   },
 });

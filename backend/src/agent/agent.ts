@@ -1,9 +1,11 @@
 import Dedalus, { DedalusRunner } from "dedalus-labs";
-import type { RunParams, RunResult } from "dedalus-labs/lib/runner/runner.js";
+import type { RunParams } from "dedalus-labs/lib/runner/runner.js";
 import type { Tool, ToolResult } from "dedalus-labs/lib/runner/index.js";
 import { getBrowserTools, type BrowserToolProgressEvent } from "../browser/tools.js";
 import { extractSignals, type Signal } from "../browser/signals.js";
 import { buildInstructions } from "./system-prompt.js";
+import { getConvexClient, api } from "../convex.js";
+import type { Id } from "../../../convex/_generated/dataModel.js";
 
 export interface InvestigationConfig {
   targetUrl: string;
@@ -17,6 +19,7 @@ export interface InvestigationConfig {
 export interface InvestigationResult {
   agentId: string;
   status: "running" | "completed" | "failed" | "stopped";
+  liveBrowserUrl: string | null;
   output: string | null;
   signals: Signal[];
   toolsCalled: string[];
@@ -26,20 +29,24 @@ export interface InvestigationResult {
   error: string | null;
 }
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
 const DEFAULT_MAX_STEPS = 30;
-const DEFAULT_MAX_TOKENS = 2048;
+const FLUSH_DEBOUNCE_MS = 400;
 
 export class SecurityAgent {
   private readonly model: string;
   private result: InvestigationResult | null = null;
   private abortController: AbortController | null = null;
   private runPromise: Promise<void> | null = null;
+  private readonly chatId: Id<"chats">;
+  private lastFlushedActivityIndex = 0;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
   readonly id: string;
 
-  constructor(config?: { model?: string }) {
+  constructor(config: { chatId: string; model?: string }) {
     this.id = crypto.randomUUID();
-    this.model = config?.model ?? DEFAULT_MODEL;
+    this.model = config.model ?? DEFAULT_MODEL;
+    this.chatId = config.chatId as Id<"chats">;
   }
 
   async investigate(config: InvestigationConfig): Promise<InvestigationResult> {
@@ -50,6 +57,7 @@ export class SecurityAgent {
     this.result = {
       agentId: this.id,
       status: "running",
+      liveBrowserUrl: null,
       output: null,
       signals: [],
       toolsCalled: [],
@@ -68,6 +76,7 @@ export class SecurityAgent {
 
     const tools: Tool[] = getBrowserTools({
       onEvent: (event) => this.handleToolProgressEvent(event),
+      abortSignal: this.abortController.signal,
     });
     const mcpServers = config.mcpServers ?? [];
 
@@ -82,14 +91,17 @@ export class SecurityAgent {
           tools,
           mcpServers,
           maxSteps: config.maxSteps ?? DEFAULT_MAX_STEPS,
-          max_tokens: DEFAULT_MAX_TOKENS,
         };
 
-        const runResult = await runWithStreamingFallback(
+        const runResult = await runWithStreaming(
           runner,
           runParams,
-          (message) => this.pushActivity(message),
+          this.abortController?.signal,
         );
+
+        if (this.result?.status === "stopped") {
+          return;
+        }
 
         this.result!.output = runResult.finalOutput;
         this.result!.toolsCalled =
@@ -119,11 +131,27 @@ export class SecurityAgent {
 
         // Deduplicate signals
         this.result!.signals = deduplicateSignals(this.result!.signals);
+
+        await this.flushTerminal();
       } catch (err) {
+        if (isAbortError(err) || this.result?.status === "stopped") {
+          if (this.result && this.result.status !== "stopped") {
+            this.result.status = "stopped";
+            this.pushActivity("Investigation stopped by request.");
+          }
+          if (this.result) {
+            this.result.error = null;
+          }
+          await this.flushTerminal();
+          return;
+        }
+
         this.result!.status = "failed";
         this.result!.error =
           err instanceof Error ? err.message : String(err);
         this.pushActivity("Investigation failed.");
+
+        await this.flushTerminal();
       }
     })();
 
@@ -149,9 +177,10 @@ export class SecurityAgent {
 
   destroy(): void {
     this.stop();
-    this.result = null;
-    this.runPromise = null;
-    this.abortController = null;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
   }
 
   private pushActivity(message: string): void {
@@ -160,10 +189,15 @@ export class SecurityAgent {
     const entry = `[${new Date(now).toLocaleTimeString("en-US", { hour12: false })}] ${message}`;
     this.result.activity = [...this.result.activity, entry].slice(-60);
     this.result.lastActivityAt = now;
+    this.scheduleFlush();
   }
 
   private handleToolProgressEvent(event: BrowserToolProgressEvent): void {
     if (!this.result) return;
+
+    if (event.liveUrl) {
+      this.result.liveBrowserUrl = event.liveUrl;
+    }
 
     if (
       event.phase === "start" &&
@@ -172,8 +206,146 @@ export class SecurityAgent {
       this.result.toolsCalled = [...this.result.toolsCalled, event.tool];
     }
 
+    // Keep live URL updates out of rolling activity logs; UI renders a pinned live URL section.
+    if (event.liveUrl || event.message.startsWith("Live browser view:")) {
+      // Still flush for liveBrowserUrl changes
+      this.scheduleFlush();
+      return;
+    }
+
     this.pushActivity(event.message);
   }
+
+  private scheduleFlush(): void {
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => {
+      this.flushToConvex().catch((err) => {
+        console.error("Failed to flush investigation state to Convex:", err);
+      });
+    }, FLUSH_DEBOUNCE_MS);
+  }
+
+  private async flushToConvex(): Promise<void> {
+    if (!this.result) return;
+    const convex = getConvexClient();
+
+    // Persist new activity lines as chatMessages
+    const newLines = this.result.activity.slice(this.lastFlushedActivityIndex);
+    this.lastFlushedActivityIndex = this.result.activity.length;
+
+    for (let i = 0; i < newLines.length; i++) {
+      await convex.mutation(api.messages.create, {
+        chatId: this.chatId,
+        role: "assistant" as const,
+        content: newLines[i],
+        kind: "status" as const,
+      });
+    }
+
+    // Patch investigation state
+    await convex.mutation(api.investigations.updateState, {
+      agentId: this.id,
+      status: this.result.status,
+      ...(this.result.liveBrowserUrl
+        ? { liveBrowserUrl: this.result.liveBrowserUrl }
+        : {}),
+      ...(this.result.toolsCalled.length > 0
+        ? { toolsCalled: this.result.toolsCalled }
+        : {}),
+      ...(this.result.stepsUsed > 0
+        ? { stepsUsed: this.result.stepsUsed }
+        : {}),
+    });
+  }
+
+  private async flushTerminal(): Promise<void> {
+    // Cancel any pending debounced flush
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+
+    if (!this.result) return;
+    const convex = getConvexClient();
+
+    // Flush any remaining activity lines
+    const newLines = this.result.activity.slice(this.lastFlushedActivityIndex);
+    this.lastFlushedActivityIndex = this.result.activity.length;
+
+    for (let i = 0; i < newLines.length; i++) {
+      await convex.mutation(api.messages.create, {
+        chatId: this.chatId,
+        role: "assistant" as const,
+        content: newLines[i],
+        kind: "status" as const,
+      });
+    }
+
+    // Build and persist the terminal message
+    const terminal = buildTerminalMessage(this.result);
+    await convex.mutation(api.messages.create, {
+      chatId: this.chatId,
+      role: "assistant" as const,
+      content: terminal.content,
+      kind: terminal.kind,
+    });
+
+    // Final state patch with output, signals, error
+    await convex.mutation(api.investigations.updateState, {
+      agentId: this.id,
+      status: this.result.status,
+      ...(this.result.output ? { output: this.result.output } : {}),
+      ...(this.result.error ? { error: this.result.error } : {}),
+      ...(this.result.signals.length > 0
+        ? {
+            signals: this.result.signals.map((s) => ({
+              type: s.type,
+              confidence: s.confidence,
+              details: s.details,
+              evidence: s.evidence,
+              suggestedFollowUps: s.suggestedFollowUps,
+            })),
+          }
+        : {}),
+      stepsUsed: this.result.stepsUsed,
+      toolsCalled: this.result.toolsCalled,
+    });
+  }
+}
+
+function buildTerminalMessage(result: InvestigationResult): {
+  content: string;
+  kind: "message" | "status";
+} {
+  if (result.status === "completed") {
+    const output =
+      result.output?.trim() || "Investigation completed with no output.";
+    const signals =
+      result.signals.length > 0
+        ? `\n\nSignals detected (${result.signals.length}):\n${result.signals
+            .map(
+              (signal, index) =>
+                `${index + 1}. ${signal.type} (${signal.confidence})`,
+            )
+            .join("\n")}`
+        : "";
+    return {
+      content: `${output}${signals}`,
+      kind: "message",
+    };
+  }
+
+  if (result.status === "failed") {
+    return {
+      content: `Investigation failed: ${result.error ?? "Unknown error."}`,
+      kind: "status",
+    };
+  }
+
+  return {
+    content: "Investigation stopped.",
+    kind: "status",
+  };
 }
 
 interface RunnerExecutionResult {
@@ -183,46 +355,22 @@ interface RunnerExecutionResult {
   stepsUsed: number;
 }
 
-async function runWithStreamingFallback(
+async function runWithStreaming(
   runner: DedalusRunner,
   runParams: RunParams,
-  onActivity?: (message: string) => void,
+  abortSignal?: AbortSignal,
 ): Promise<RunnerExecutionResult> {
-  try {
-    const result = (await runner.run(runParams)) as RunResult;
-    return {
-      finalOutput: result.finalOutput,
-      toolResults: result.toolResults,
-      toolsCalled: result.toolsCalled,
-      stepsUsed: result.stepsUsed,
-    };
-  } catch (err) {
-    if (!isStreamingRequiredError(err)) {
-      throw err;
-    }
-    onActivity?.("Model requires streaming mode; retrying with streaming enabled.");
+  const stream = (await runner.run({
+    ...runParams,
+    stream: true,
+  })) as AsyncIterable<unknown>;
 
-    const stream = (await runner.run({
-      ...runParams,
-      stream: true,
-    })) as AsyncIterable<unknown>;
-
-    return {
-      finalOutput: await collectStreamOutput(stream),
-      toolResults: [],
-      toolsCalled: [],
-      stepsUsed: 0,
-    };
-  }
-}
-
-function isStreamingRequiredError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    message.includes("streaming_required") ||
-    message.includes("requires streaming") ||
-    message.includes('Set "stream": true')
-  );
+  return {
+    finalOutput: await collectStreamOutput(stream, abortSignal),
+    toolResults: [],
+    toolsCalled: [],
+    stepsUsed: 0,
+  };
 }
 
 function extractChunkContent(chunk: unknown): string | null {
@@ -243,14 +391,55 @@ function extractChunkContent(chunk: unknown): string | null {
   return typeof content === "string" ? content : null;
 }
 
-async function collectStreamOutput(stream: AsyncIterable<unknown>): Promise<string> {
+async function collectStreamOutput(
+  stream: AsyncIterable<unknown>,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  if (abortSignal?.aborted) {
+    throw createAbortError();
+  }
+
   const parts: string[] = [];
-  for await (const chunk of stream) {
-    const content = extractChunkContent(chunk);
-    if (content) {
-      parts.push(content);
+  const iterator = stream[Symbol.asyncIterator]();
+
+  let onAbort: (() => void) | null = null;
+  const abortPromise: Promise<never> | null = abortSignal
+    ? new Promise((_, reject) => {
+      onAbort = () => reject(createAbortError());
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    })
+    : null;
+
+  try {
+    while (true) {
+      const next = abortPromise
+        ? (await Promise.race([iterator.next(), abortPromise])) as IteratorResult<unknown>
+        : await iterator.next();
+
+      if (next.done) {
+        break;
+      }
+
+      const content = extractChunkContent(next.value);
+      if (content) {
+        parts.push(content);
+      }
+    }
+  } catch (err) {
+    if (isAbortError(err)) {
+      try {
+        await iterator.return?.();
+      } catch {
+        // Best effort stream cleanup.
+      }
+    }
+    throw err;
+  } finally {
+    if (abortSignal && onAbort) {
+      abortSignal.removeEventListener("abort", onAbort);
     }
   }
+
   return parts.join("");
 }
 
@@ -269,4 +458,22 @@ function deduplicateSignals(signals: Signal[]): Signal[] {
     seen.add(key);
     return true;
   });
+}
+
+function createAbortError(): Error {
+  const error = new Error("Investigation aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  return error.message.toLowerCase().includes("abort");
 }

@@ -22,7 +22,7 @@ pnpm install
 # Backend
 pnpm backend:dev          # dev server with hot reload (bun --watch)
 pnpm backend:start        # production start
-pnpm backend:typecheck    # type-check backend only
+bunx tsc -p backend/tsconfig.json --noEmit  # type-check backend only
 
 # Frontend (run from frontend/)
 pnpm dev                  # vite dev server
@@ -46,7 +46,7 @@ pnpm preview              # preview production build
 
 ## Context7
 
-Always use Context7 MCP when I need library/API documentation, code generation, setup or configuration steps without me having to explicitly ask.
+**ALWAYS prefer Context7 MCP over web search** for library/API documentation, code generation, setup, or configuration steps. Context7 provides more accurate, structured results and should be the first tool reached for when needing docs or examples. Only fall back to web search if Context7 does not have the information needed. Use Context7 proactively without me having to explicitly ask.
 
 ## Bash Guidelines
 
@@ -71,3 +71,5 @@ When you make a mistake or learn something important during a session, update CL
 - In `frontend/`, `pnpm exec tsc` can pass without checking app sources because `tsconfig.json` is solution-style with empty `files` and project references. Use `pnpm exec tsc -p tsconfig.app.json` to validate frontend source files directly.
 - If `pnpm --filter hacker-use-frontend ...` reports no matching projects, ensure `pnpm-workspace.yaml` includes `packages: [frontend]`.
 - Agent `activity` is a rolling window (max 60 lines), so persistence cursors cannot rely on array length. Use last-seen line matching (`lastActivityLine`) to append only new activity updates.
+- Root type-check command is `pnpm typecheck`; there is no `pnpm backend:typecheck` script.
+- Browser Use `cloud.browser-use.com` share URLs are not iframe-embeddable (`frame-ancestors 'none'`); for embedded live views, use session `liveUrl` instead.

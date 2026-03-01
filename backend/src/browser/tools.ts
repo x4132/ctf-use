@@ -1,6 +1,11 @@
 import type { Tool } from "dedalus-labs/lib/runner/index.js";
 import type { JSONSchema } from "dedalus-labs/lib/utils/schemas.js";
-import type { SessionView, TaskResult, TaskStepView } from "browser-use-sdk";
+import type {
+  SessionView,
+  TaskResult,
+  TaskRun,
+  TaskStepView,
+} from "browser-use-sdk";
 import { getBrowserClient } from "./client.js";
 import { extractSignals, type Signal } from "./signals.js";
 
@@ -96,10 +101,14 @@ export interface BrowserToolProgressEvent {
   tool: BrowserToolName;
   phase: "start" | "step" | "end";
   message: string;
+  sessionId?: string;
+  taskId?: string;
+  liveUrl?: string | null;
 }
 
 export interface BrowserToolHooks {
   onEvent?: (event: BrowserToolProgressEvent) => void;
+  abortSignal?: AbortSignal;
 }
 
 function emitToolEvent(
@@ -111,6 +120,68 @@ function emitToolEvent(
 
 const DEFAULT_BROWSER_TASK_MAX_STEPS = 15;
 const DEFAULT_BROWSER_TASK_TIMEOUT_MS = 45_000;
+const TASK_ID_LOOKUP_TIMEOUT_MS = 1_500;
+const TASK_ID_STOP_LOOKUP_TIMEOUT_MS = 10_000;
+const TASK_ID_LOOKUP_INTERVAL_MS = 100;
+
+function createAbortError(): Error {
+  const error = new Error("Browser task aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  return error.message.toLowerCase().includes("abort");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForTaskId(
+  taskRun: TaskRun<string>,
+  timeoutMs = TASK_ID_LOOKUP_TIMEOUT_MS,
+): Promise<string | null> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (taskRun.taskId) {
+      return taskRun.taskId;
+    }
+    await sleep(TASK_ID_LOOKUP_INTERVAL_MS);
+  }
+  return taskRun.taskId;
+}
+
+async function resolveRunTaskSessionId(
+  taskRun: TaskRun<string>,
+): Promise<string | null> {
+  const taskId = await waitForTaskId(taskRun);
+  if (!taskId) {
+    return null;
+  }
+
+  const client = getBrowserClient();
+  const task = await client.tasks.get(taskId);
+  return task.sessionId;
+}
+
+async function resolveSessionLiveUrl(
+  sessionId: string,
+): Promise<string | null> {
+  const client = getBrowserClient();
+  const session = await client.sessions.get(sessionId);
+  return session.liveUrl ?? null;
+}
 
 const browserRunTaskParameters = {
   type: "object",
@@ -201,8 +272,11 @@ function createBrowserRunTaskTool(
         message: `Starting browser task: ${args.task.slice(0, 180)}`,
       });
 
+      let onAbort: (() => void) | null = null;
+
       try {
         const client = getBrowserClient();
+        const abortSignal = hooks?.abortSignal;
 
         const taskRun = client.run(args.task, {
           startUrl: args.startUrl,
@@ -210,6 +284,117 @@ function createBrowserRunTaskTool(
           maxSteps: args.maxSteps ?? DEFAULT_BROWSER_TASK_MAX_STEPS,
           timeout: DEFAULT_BROWSER_TASK_TIMEOUT_MS,
         });
+        let liveViewAnnounced = false;
+        let liveViewLookupInFlight = false;
+        let resolvedSessionId: string | null = args.sessionId ?? null;
+        let stopInFlight: Promise<void> | null = null;
+        const resolveSessionIdPromise = (async () => {
+          if (resolvedSessionId) {
+            return resolvedSessionId;
+          }
+          resolvedSessionId = await resolveRunTaskSessionId(taskRun);
+          return resolvedSessionId;
+        })();
+
+        const requestStop = async (): Promise<void> => {
+          if (stopInFlight) {
+            return stopInFlight;
+          }
+
+          stopInFlight = (async () => {
+            const taskId = await waitForTaskId(
+              taskRun,
+              TASK_ID_STOP_LOOKUP_TIMEOUT_MS,
+            );
+
+            if (taskId) {
+              emitToolEvent(hooks, {
+                tool: "browser_run_task",
+                phase: "step",
+                message: `Stopping browser task ${taskId}.`,
+                taskId,
+              });
+
+              const task = await client.tasks.stopTaskAndSession(taskId);
+              resolvedSessionId = task.sessionId ?? resolvedSessionId;
+
+              emitToolEvent(hooks, {
+                tool: "browser_run_task",
+                phase: "step",
+                message: `Stop requested for browser task ${taskId}.`,
+                taskId,
+                sessionId: resolvedSessionId ?? undefined,
+              });
+              return;
+            }
+
+            const sessionId = await resolveSessionIdPromise;
+            if (!sessionId) {
+              return;
+            }
+
+            emitToolEvent(hooks, {
+              tool: "browser_run_task",
+              phase: "step",
+              message: `Stopping browser session ${sessionId}.`,
+              sessionId,
+            });
+            await client.sessions.stop(sessionId);
+            emitToolEvent(hooks, {
+              tool: "browser_run_task",
+              phase: "step",
+              message: `Stop requested for browser session ${sessionId}.`,
+              sessionId,
+            });
+          })();
+
+          return stopInFlight;
+        };
+
+        onAbort = () => {
+          void requestStop().catch((stopError) => {
+            emitToolEvent(hooks, {
+              tool: "browser_run_task",
+              phase: "step",
+              message:
+                `Failed to stop browser task cleanly: ${stopError instanceof Error ? stopError.message : String(stopError)}`,
+            });
+          });
+        };
+        abortSignal?.addEventListener("abort", onAbort, { once: true });
+
+        const tryEmitLiveView = async (): Promise<void> => {
+          if (liveViewAnnounced || liveViewLookupInFlight) {
+            return;
+          }
+          liveViewLookupInFlight = true;
+          try {
+            const sessionId = await resolveSessionIdPromise;
+            if (!sessionId) return;
+
+            const liveUrl = await resolveSessionLiveUrl(sessionId);
+            if (!liveUrl) return;
+
+            liveViewAnnounced = true;
+            emitToolEvent(hooks, {
+              tool: "browser_run_task",
+              phase: "step",
+              message: `Live browser view: ${liveUrl}`,
+              sessionId,
+              liveUrl,
+            });
+          } catch {
+            // Best effort only: missing live view URL should not fail the task.
+          } finally {
+            liveViewLookupInFlight = false;
+          }
+        };
+        const announceLiveViewPromise = tryEmitLiveView();
+
+        if (abortSignal?.aborted) {
+          await requestStop();
+          throw createAbortError();
+        }
 
         // Collect steps via async iteration
         const steps: BrowserTaskStep[] = [];
@@ -227,11 +412,32 @@ function createBrowserRunTaskTool(
             phase: "step",
             message: `Browser step ${step.number}: ${step.nextGoal || "continuing"} (${step.url})`,
           });
+
+          if (!liveViewAnnounced) {
+            await tryEmitLiveView();
+          }
+
+          if (abortSignal?.aborted) {
+            await requestStop();
+            throw createAbortError();
+          }
         }
 
         const result: TaskResult | null = taskRun.result;
         if (!result) {
           throw new Error("browser_run_task completed without a task result");
+        }
+
+        if (abortSignal?.aborted) {
+          await requestStop();
+          throw createAbortError();
+        }
+
+        await announceLiveViewPromise;
+
+        if (!liveViewAnnounced) {
+          resolvedSessionId = result.sessionId;
+          await tryEmitLiveView();
         }
 
         const output =
@@ -247,6 +453,8 @@ function createBrowserRunTaskTool(
           tool: "browser_run_task",
           phase: "end",
           message: `Browser task finished with status ${result.status} after ${result.steps.length} steps.`,
+          taskId: result.id,
+          sessionId: result.sessionId,
         });
 
         return {
@@ -265,12 +473,25 @@ function createBrowserRunTaskTool(
           })),
         };
       } catch (err) {
+        if (isAbortError(err)) {
+          emitToolEvent(hooks, {
+            tool: "browser_run_task",
+            phase: "end",
+            message: "Browser task stopped by request.",
+          });
+          throw err;
+        }
+
         emitToolEvent(hooks, {
           tool: "browser_run_task",
           phase: "end",
           message: `Browser task failed: ${err instanceof Error ? err.message : String(err)}`,
         });
         throw err;
+      } finally {
+        if (onAbort) {
+          hooks?.abortSignal?.removeEventListener("abort", onAbort);
+        }
       }
     },
     {
@@ -307,17 +528,22 @@ function createBrowserCreateSessionTool(
         keepAlive: args.keepAlive ?? true,
         startUrl: args.startUrl,
       });
+      const liveUrl = await resolveSessionLiveUrl(session.id);
 
       emitToolEvent(hooks, {
         tool: "browser_create_session",
         phase: "end",
-        message: `Created session ${session.id}.`,
+        message: liveUrl
+          ? `Created session ${session.id}. Live browser view: ${liveUrl}`
+          : `Created session ${session.id}.`,
+        sessionId: session.id,
+        liveUrl,
       });
 
       return {
         sessionId: session.id,
         status: session.status,
-        liveUrl: session.liveUrl ?? null,
+        liveUrl,
       };
     },
     {
@@ -347,17 +573,22 @@ function createBrowserGetSessionTool(
 
       const client = getBrowserClient();
       const session = await client.sessions.get(args.sessionId);
+      const liveUrl = await resolveSessionLiveUrl(session.id);
 
       emitToolEvent(hooks, {
         tool: "browser_get_session",
         phase: "end",
-        message: `Session ${session.id} is ${session.status}.`,
+        message: liveUrl
+          ? `Session ${session.id} is ${session.status}. Live browser view: ${liveUrl}`
+          : `Session ${session.id} is ${session.status}.`,
+        sessionId: session.id,
+        liveUrl,
       });
 
       return {
         sessionId: session.id,
         status: session.status,
-        liveUrl: session.liveUrl ?? null,
+        liveUrl,
         startedAt: session.startedAt,
         finishedAt: session.finishedAt ?? null,
         persistMemory: session.persistMemory,

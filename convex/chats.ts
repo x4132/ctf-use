@@ -20,7 +20,6 @@ export const create = mutation({
     const title = args.title?.trim() || DEFAULT_CHAT_TITLE;
     return await ctx.db.insert("chats", {
       title,
-      investigations: [],
       createdAt: now,
       updatedAt: now,
     });
@@ -63,8 +62,15 @@ export const remove = mutation({
       .query("chatMessages")
       .withIndex("by_chatId_createdAt", (q) => q.eq("chatId", args.chatId))
       .collect();
+    const investigations = await ctx.db
+      .query("investigations")
+      .withIndex("by_chatId", (q) => q.eq("chatId", args.chatId))
+      .collect();
 
-    await Promise.all(messages.map((message) => ctx.db.delete(message._id)));
+    await Promise.all([
+      ...messages.map((message) => ctx.db.delete(message._id)),
+      ...investigations.map((inv) => ctx.db.delete(inv._id)),
+    ]);
     await ctx.db.delete(args.chatId);
   },
 });

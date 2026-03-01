@@ -1,7 +1,8 @@
 import { initTRPC } from '@trpc/server'
 import { z } from 'zod'
 import { SecurityAgent } from '../agent/agent.js'
-import type { InvestigationResult } from '../agent/agent.js'
+import { getConvexClient, api } from '../convex.js'
+import type { Id } from '../../../convex/_generated/dataModel.js'
 
 const t = initTRPC.create()
 
@@ -12,6 +13,7 @@ const agentRouter = t.router({
   investigate: t.procedure
     .input(
       z.object({
+        chatId: z.string(),
         targetUrl: z.string().url(),
         goal: z.string().min(1),
         context: z.string().optional(),
@@ -21,8 +23,18 @@ const agentRouter = t.router({
       }),
     )
     .mutation(async ({ input }) => {
-      const agent = new SecurityAgent({ model: input.model })
+      const agent = new SecurityAgent({
+        chatId: input.chatId,
+        model: input.model,
+      })
       agents.set(agent.id, agent)
+
+      // Create investigation document in Convex
+      const convex = getConvexClient()
+      await convex.mutation(api.investigations.create, {
+        chatId: input.chatId as Id<"chats">,
+        agentId: agent.id,
+      })
 
       // Start investigation in the background
       const promise = agent.investigate({
@@ -34,46 +46,16 @@ const agentRouter = t.router({
         mcpServers: input.mcpServers,
       })
 
-      // Don't await — let it run. Client polls via getStatus.
+      // Self-clean on completion — agent writes terminal state to Convex
       promise.then(() => {
-        // Investigation complete — result is on the agent
+        agents.delete(agent.id)
       }).catch(() => {
-        // Errors captured on the agent result
+        agents.delete(agent.id)
       })
 
       return {
         agentId: agent.id,
         status: 'running' as const,
-      }
-    }),
-
-  getStatus: t.procedure
-    .input(z.object({ agentId: z.string() }))
-    .query(({ input }): InvestigationResult => {
-      const agent = agents.get(input.agentId)
-      if (!agent) {
-        return {
-          agentId: input.agentId,
-          status: 'failed',
-          output: null,
-          signals: [],
-          toolsCalled: [],
-          stepsUsed: 0,
-          activity: [],
-          lastActivityAt: null,
-          error: 'Agent not found',
-        }
-      }
-      return agent.getResult() ?? {
-        agentId: input.agentId,
-        status: 'running',
-        output: null,
-        signals: [],
-        toolsCalled: [],
-        stepsUsed: 0,
-        activity: [],
-        lastActivityAt: null,
-        error: null,
       }
     }),
 
@@ -99,7 +81,7 @@ const agentRouter = t.router({
   list: t.procedure.query(() => {
     const entries: Array<{
       agentId: string
-      status: InvestigationResult['status']
+      status: string
       stepsUsed: number
       signalCount: number
     }> = []
