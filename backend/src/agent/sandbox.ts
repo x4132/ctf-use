@@ -3,7 +3,7 @@ import type { Sandbox } from "@daytonaio/sdk";
 
 const OPENCODE_PORT = 4096;
 const OPENCODE_VERSION = "1.1.1";
-const DEFAULT_MODEL = "minimax-m2.5-free";
+const DEFAULT_MODEL = "opencode/big-pickle";
 const READY_MARKER = "opencode server listening";
 const SERVER_TIMEOUT_MS = 90_000;
 const POLL_INTERVAL_MS = 1000;
@@ -14,11 +14,47 @@ export interface SandboxHandle {
   destroy(): Promise<void>;
 }
 
+/**
+ * Start (or restart) the OpenCode server inside an already-running sandbox.
+ * Creates the process session if needed, launches `opencode serve`, and waits
+ * for the readiness marker. Returns the public base URL.
+ */
+async function startOpenCodeServer(
+  sandbox: Sandbox,
+  chatId: string,
+): Promise<string> {
+  const sessionId = `opencode-${sandbox.id}`;
+  try {
+    await sandbox.process.createSession(sessionId);
+  } catch {
+    // Session may already exist from a prior run
+  }
+
+  const command = await sandbox.process.executeSessionCommand(sessionId, {
+    command: `cd /home/daytona && BROWSER_USE_API_KEY=${process.env.BROWSER_USE_API_KEY ?? ""} OPENCODE_CONFIG=/home/daytona/opencode.json OPENCODE_DISABLE_MODELS_FETCH=true OPENCODE_DISABLE_AUTOUPDATE=true opencode serve --port ${OPENCODE_PORT} --hostname 0.0.0.0 2>&1`,
+    runAsync: true,
+  });
+
+  if (!command.cmdId) {
+    throw new Error("Failed to start opencode server in sandbox");
+  }
+  console.log(`[${chatId}] opencode server started (async), cmdId=${command.cmdId}`);
+
+  await waitForServer(sandbox, sessionId, command.cmdId, chatId);
+
+  const preview = await sandbox.getPreviewLink(OPENCODE_PORT);
+  const baseUrl = preview.url.replace(/\/$/, "");
+  console.log(`[${chatId}] opencode server ready at ${baseUrl}`);
+  return baseUrl;
+}
+
 export async function createSandbox(
   chatId: string,
   rules: string,
   model?: string,
+  onStatus?: (status: string) => void,
 ): Promise<SandboxHandle> {
+  onStatus?.("Creating sandbox...");
   console.log(`[${chatId}] Creating Daytona sandbox`);
   const daytona = new Daytona();
 
@@ -30,6 +66,7 @@ export async function createSandbox(
   console.log(`[${chatId}] Sandbox created: ${sandbox.id}`);
 
   // Install opencode
+  onStatus?.("Installing OpenCode...");
   await sandbox.process.executeCommand(
     `npm i -g opencode-ai@${OPENCODE_VERSION}`,
   );
@@ -48,6 +85,7 @@ export async function createSandbox(
     permission: { "*": "allow" },
     autoupdate: false,
     share: "disabled",
+    model: model ?? DEFAULT_MODEL,
     mcp: {
       "browser-use": {
         type: "remote",
@@ -70,27 +108,9 @@ export async function createSandbox(
   );
   console.log(`[${chatId}] opencode config written`);
 
-  // Start opencode server in background
-  const sessionId = `opencode-${sandbox.id}`;
-  await sandbox.process.createSession(sessionId);
-
-  const command = await sandbox.process.executeSessionCommand(sessionId, {
-    command: `cd /home/daytona && BROWSER_USE_API_KEY=${process.env.BROWSER_USE_API_KEY ?? ""} OPENCODE_CONFIG=/home/daytona/opencode.json OPENCODE_DISABLE_MODELS_FETCH=true OPENCODE_DISABLE_AUTOUPDATE=true opencode serve --port ${OPENCODE_PORT} --hostname 0.0.0.0 2>&1`,
-    runAsync: true,
-  });
-
-  if (!command.cmdId) {
-    throw new Error("Failed to start opencode server in sandbox");
-  }
-  console.log(`[${chatId}] opencode server started (async), cmdId=${command.cmdId}`);
-
-  // Wait for server readiness by tailing logs
-  await waitForServer(sandbox, sessionId, command.cmdId, chatId);
-
-  // Get public preview URL
-  const preview = await sandbox.getPreviewLink(OPENCODE_PORT);
-  const baseUrl = preview.url.replace(/\/$/, "");
-  console.log(`[${chatId}] opencode server ready at ${baseUrl}`);
+  onStatus?.("Starting OpenCode server...");
+  const baseUrl = await startOpenCodeServer(sandbox, chatId);
+  onStatus?.("Sandbox ready");
 
   return {
     baseUrl,
@@ -109,17 +129,28 @@ export async function createSandbox(
 export async function reconnectToSandbox(
   sandboxId: string,
   chatId: string,
+  onStatus?: (status: string) => void,
 ): Promise<SandboxHandle> {
   console.log(`[${chatId}] Reconnecting to sandbox ${sandboxId}`);
   const daytona = new Daytona();
   const sandbox = await daytona.get(sandboxId);
 
-  // Start the sandbox if it was auto-stopped
+  // Start the sandbox if it was stopped (no-op if already running)
   await sandbox.start();
   console.log(`[${chatId}] Sandbox ${sandboxId} is running`);
 
+  // Check if OpenCode server is already alive (e.g. sandbox never stopped, just backend restarted)
   const preview = await sandbox.getPreviewLink(OPENCODE_PORT);
-  const baseUrl = preview.url.replace(/\/$/, "");
+  let baseUrl = preview.url.replace(/\/$/, "");
+
+  const alive = await isOpenCodeAlive(baseUrl);
+  if (alive) {
+    console.log(`[${chatId}] OpenCode server already running at ${baseUrl}`);
+  } else {
+    console.log(`[${chatId}] OpenCode server not responding, restarting...`);
+    onStatus?.("Restarting OpenCode server...");
+    baseUrl = await startOpenCodeServer(sandbox, chatId);
+  }
   console.log(`[${chatId}] Reconnected to sandbox at ${baseUrl}`);
 
   return {
@@ -141,6 +172,15 @@ export async function deleteSandboxById(sandboxId: string): Promise<void> {
   const sandbox = await daytona.get(sandboxId);
   await sandbox.delete();
   console.log(`Sandbox ${sandboxId} deleted by ID`);
+}
+
+async function isOpenCodeAlive(baseUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/session`, { signal: AbortSignal.timeout(5000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function waitForServer(

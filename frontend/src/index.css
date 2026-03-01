@@ -130,3 +130,9 @@
     @apply cursor-pointer;
   }
 }
+
+/* Limit streamdown code block height */
+[data-streamdown="code-block-body"] {
+  max-height: 20rem;
+  overflow-y: auto;
+}

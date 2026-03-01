@@ -64,6 +64,45 @@ export const setSandboxId = mutation({
   },
 });
 
+export const setStatus = mutation({
+  args: {
+    chatId: v.id("chats"),
+    status: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+    await ctx.db.patch(args.chatId, { status: args.status });
+  },
+});
+
+export const setIsRunning = mutation({
+  args: {
+    chatId: v.id("chats"),
+    isRunning: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+    await ctx.db.patch(args.chatId, { isRunning: args.isRunning });
+  },
+});
+
+export const setLiveUrl = mutation({
+  args: {
+    chatId: v.id("chats"),
+    liveUrl: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+    await ctx.db.patch(args.chatId, {
+      liveUrl: args.liveUrl,
+      updatedAt: Date.now(),
+    });
+  },
+});
+
 export const remove = mutation({
   args: {
     chatId: v.id("chats"),

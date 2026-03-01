@@ -20,7 +20,7 @@ export const create = mutation({
     chatId: v.id("chats"),
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
-    kind: v.optional(v.union(v.literal("message"), v.literal("status"))),
+    kind: v.optional(v.union(v.literal("message"), v.literal("status"), v.literal("tool"))),
   },
   handler: async (ctx, args) => {
     const now = Date.now();

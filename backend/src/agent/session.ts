@@ -9,6 +9,58 @@ export interface OpenCodeSession {
   abort(): Promise<void>;
 }
 
+function buildSessionHandle(
+  client: ReturnType<typeof createOpencodeClient>,
+  sessionId: string,
+  chatId: string,
+): OpenCodeSession {
+  return {
+    sessionId,
+
+    async sendMessage(text: string) {
+      console.log(`[${chatId}] Sending prompt (${text.length} chars)`);
+
+      // Subscribe to events BEFORE sending the prompt to avoid missing early events
+      const eventSub = await client.event.subscribe();
+
+      // Fire the prompt — events will stream in parallel via SSE
+      const promptPromise = client.session.prompt({
+        path: { id: sessionId },
+        body: {
+          parts: [{ type: "text" as const, text }],
+        },
+      });
+
+      // Consume events until the prompt resolves
+      await consumeEvents(
+        eventSub.stream,
+        sessionId,
+        chatId as Id<"chats">,
+        promptPromise,
+      );
+
+      // Check prompt result for errors
+      const promptResult = await promptPromise as { error?: unknown; data?: unknown };
+      if (promptResult?.error) {
+        throw new Error(
+          `OpenCode prompt failed: ${typeof promptResult.error === "string" ? promptResult.error : JSON.stringify(promptResult.error)}`,
+        );
+      }
+
+      console.log(`[${chatId}] Prompt round complete`);
+    },
+
+    async abort() {
+      try {
+        await client.session.abort({ path: { id: sessionId } });
+        console.log(`[${chatId}] Session aborted`);
+      } catch {
+        // best-effort
+      }
+    },
+  };
+}
+
 export async function createOpenCodeSession(
   baseUrl: string,
   chatId: string,
@@ -31,48 +83,46 @@ export async function createOpenCodeSession(
   }
   console.log(`[${chatId}] opencode session created: ${sessionId}`);
 
-  return {
-    sessionId,
+  return buildSessionHandle(client, sessionId, chatId);
+}
 
-    async sendMessage(text: string) {
-      console.log(`[${chatId}] Sending prompt (${text.length} chars)`);
+export async function resumeOrCreateOpenCodeSession(
+  baseUrl: string,
+  chatId: string,
+): Promise<OpenCodeSession> {
+  const client = createOpencodeClient({ baseUrl });
+  const expectedTitle = `hacker-use-${chatId}`;
 
-      // Subscribe to events BEFORE sending the prompt to avoid missing early events
-      const eventSub = await client.event.subscribe();
+  try {
+    const listResult = await client.session.list({
+      query: { directory: "/home/daytona" },
+    });
 
-      // Fire the prompt — events will stream in parallel via SSE
-      const promptPromise = client.session.prompt({
-        path: { id: sessionId },
-        body: {
-          parts: [{ type: "text" as const, text }],
-        },
-      });
+    if (listResult.data && listResult.data.length > 0) {
+      const matching = listResult.data.filter(
+        (s) => s.title === expectedTitle,
+      );
 
-      // Consume events until the prompt resolves
-      try {
-        await consumeEvents(
-          eventSub.stream,
-          sessionId,
-          chatId as Id<"chats">,
-          promptPromise,
+      if (matching.length > 0) {
+        const best = matching.sort(
+          (a, b) => b.time.updated - a.time.updated,
+        )[0];
+
+        console.log(
+          `[${chatId}] Resuming existing opencode session: ${best.id}`,
         );
-      } finally {
-        // Ensure prompt is resolved (it should already be done)
-        await promptPromise.catch(() => {});
+        return buildSessionHandle(client, best.id, chatId);
       }
+    }
+  } catch (err) {
+    console.warn(
+      `[${chatId}] Failed to list opencode sessions, will create new:`,
+      err,
+    );
+  }
 
-      console.log(`[${chatId}] Prompt round complete`);
-    },
-
-    async abort() {
-      try {
-        await client.session.abort({ path: { id: sessionId } });
-        console.log(`[${chatId}] Session aborted`);
-      } catch {
-        // best-effort
-      }
-    },
-  };
+  console.log(`[${chatId}] No existing session found, creating new`);
+  return createOpenCodeSession(baseUrl, chatId);
 }
 
 async function consumeEvents(
@@ -83,46 +133,46 @@ async function consumeEvents(
 ): Promise<void> {
   const convex = getConvexClient();
   let done = false;
+  let promptError: unknown = null;
 
   // Race: when the prompt resolves, mark done so we break
-  promptPromise.then(() => { done = true; }).catch(() => { done = true; });
+  promptPromise
+    .then(() => { done = true; })
+    .catch((err) => { promptError = err; done = true; });
 
-  const writeStatus = (content: string) => {
-    const entry = `[${new Date().toLocaleTimeString("en-US", { hour12: false })}] ${content}`;
+  const writeError = (content: string) => {
     convex.mutation(api.messages.create, {
       chatId,
       role: "assistant" as const,
-      content: entry,
+      content,
       kind: "status",
     }).catch((err) => {
-      console.error(`[${chatId}] Failed to write status to Convex:`, err);
+      console.error(`[${chatId}] Failed to write error to Convex:`, err);
     });
   };
 
-  // Incremental text streaming: create message on first text, update on subsequent
+  // Incremental streaming: create message on first event, update on subsequent
   const partMessageIds = new Map<string, Id<"chatMessages">>();
-  const partLatestText = new Map<string, string>();
+  const partLatestContent = new Map<string, string>();
   const partCreating = new Map<string, Promise<Id<"chatMessages">>>();
 
-  const handleTextUpdate = (partId: string, text: string) => {
-    partLatestText.set(partId, text);
+  const handlePartUpdate = (partId: string, content: string, kind: "message" | "tool") => {
+    partLatestContent.set(partId, content);
 
     const existingMsgId = partMessageIds.get(partId);
     if (existingMsgId) {
-      // Update existing message content
       convex.mutation(api.messages.updateContent, {
         messageId: existingMsgId,
-        content: text,
+        content,
       }).catch((err) => {
-        console.error(`[${chatId}] Failed to update text in Convex:`, err);
+        console.error(`[${chatId}] Failed to update part in Convex:`, err);
       });
     } else if (!partCreating.has(partId)) {
-      // First time seeing this part — create the message
       const createPromise = convex.mutation(api.messages.create, {
         chatId,
         role: "assistant" as const,
-        content: text,
-        kind: "message",
+        content,
+        kind,
       });
       partCreating.set(partId, createPromise);
 
@@ -130,18 +180,16 @@ async function consumeEvents(
         .then((msgId) => {
           partMessageIds.set(partId, msgId);
           partCreating.delete(partId);
-          // If more text arrived while creating, push the latest
-          const latest = partLatestText.get(partId);
-          if (latest !== undefined && latest !== text) {
-            handleTextUpdate(partId, latest);
+          const latest = partLatestContent.get(partId);
+          if (latest !== undefined && latest !== content) {
+            handlePartUpdate(partId, latest, kind);
           }
         })
         .catch((err) => {
-          console.error(`[${chatId}] Failed to create text message in Convex:`, err);
+          console.error(`[${chatId}] Failed to create part message in Convex:`, err);
           partCreating.delete(partId);
         });
     }
-    // else: create is in flight — the .then() handler will pick up partLatestText
   };
 
   // Track OpenCode message roles by messageID (from message.updated events)
@@ -157,6 +205,17 @@ async function consumeEvents(
         const props = event.properties as { sessionID?: string };
         if (props.sessionID === sessionId) {
           break;
+        }
+        continue;
+      }
+
+      // Surface session-level errors to the client
+      if (type === "session.error") {
+        const props = event.properties as { sessionID?: string; error?: string };
+        if (props.sessionID === sessionId) {
+          const errMsg = props.error ?? "Unknown session error";
+          console.error(`[${chatId}] session.error:`, errMsg);
+          writeError(`Session error: ${errMsg}`);
         }
         continue;
       }
@@ -181,7 +240,7 @@ async function consumeEvents(
             type?: string;
             text?: string;
             tool?: string;
-            state?: { status?: string };
+            state?: { status?: string; input?: unknown; output?: unknown; error?: string };
             id?: string;
             messageID?: string;
           };
@@ -196,14 +255,46 @@ async function consumeEvents(
 
         if (part.type === "text") {
           const partId = part.id ?? "default";
-          handleTextUpdate(partId, part.text ?? "");
+          handlePartUpdate(partId, part.text ?? "", "message");
         } else if (part.type === "tool") {
+          const partId = part.id ?? `tool-${part.tool ?? "unknown"}`;
           const toolName = part.tool ?? "unknown";
           const status = part.state?.status;
-          if (status === "running") {
-            writeStatus(`Using tool: ${toolName}`);
-          } else if (status === "completed") {
-            writeStatus(`Tool completed: ${toolName}`);
+
+          // Map OpenCode status → AI SDK ToolPart state
+          let aiState: string = "input-available";
+          if (status === "completed") aiState = "output-available";
+          else if (status === "error") aiState = "output-error";
+
+          const toolData = JSON.stringify({
+            toolName,
+            state: aiState,
+            input: part.state?.input ?? null,
+            output: part.state?.output ?? null,
+            errorText: part.state?.error ?? null,
+          });
+
+          handlePartUpdate(partId, toolData, "tool");
+
+          // Extract live_url from browser-use tool outputs
+          let output = part.state?.output;
+          if (typeof output === "string") {
+            try { output = JSON.parse(output); } catch { /* not JSON */ }
+          }
+          if (
+            output &&
+            typeof output === "object" &&
+            "live_url" in (output as Record<string, unknown>)
+          ) {
+            const liveUrl = (output as Record<string, unknown>).live_url;
+            if (typeof liveUrl === "string" && liveUrl.length > 0) {
+              convex.mutation(api.chats.setLiveUrl, {
+                chatId,
+                liveUrl,
+              }).catch((err) => {
+                console.error(`[${chatId}] Failed to set liveUrl:`, err);
+              });
+            }
           }
         }
       }
@@ -212,18 +303,18 @@ async function consumeEvents(
     // Wait for any in-flight creates to finish
     await Promise.allSettled([...partCreating.values()]);
 
-    // Final flush: ensure every part's latest text is persisted
+    // Final flush: ensure every part's latest content is persisted
     const finalWrites: Promise<unknown>[] = [];
-    for (const [partId, latestText] of partLatestText) {
-      if (!latestText.trim()) continue;
+    for (const [partId, latestContent] of partLatestContent) {
+      if (!latestContent.trim()) continue;
       const msgId = partMessageIds.get(partId);
       if (msgId) {
         finalWrites.push(
           convex.mutation(api.messages.updateContent, {
             messageId: msgId,
-            content: latestText.trim(),
+            content: latestContent.trim(),
           }).catch((err) => {
-            console.error(`[${chatId}] Failed final text update:`, err);
+            console.error(`[${chatId}] Failed final content update:`, err);
           }),
         );
       } else {
@@ -232,14 +323,29 @@ async function consumeEvents(
           convex.mutation(api.messages.create, {
             chatId,
             role: "assistant" as const,
-            content: latestText.trim(),
+            content: latestContent.trim(),
             kind: "message",
           }).catch((err) => {
-            console.error(`[${chatId}] Failed final text create:`, err);
+            console.error(`[${chatId}] Failed final content create:`, err);
           }),
         );
       }
     }
     await Promise.allSettled(finalWrites);
+
+    // Surface prompt errors to the client and re-throw
+    if (promptError) {
+      const errMsg = promptError instanceof Error ? promptError.message : String(promptError);
+      console.error(`[${chatId}] Prompt error:`, errMsg);
+      await convex.mutation(api.messages.create, {
+        chatId,
+        role: "assistant" as const,
+        content: `Error: ${errMsg}`,
+        kind: "status",
+      }).catch((err) => {
+        console.error(`[${chatId}] Failed to write prompt error to Convex:`, err);
+      });
+      throw promptError;
+    }
   }
 }

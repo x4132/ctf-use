@@ -5,6 +5,9 @@ export default defineSchema({
   chats: defineTable({
     title: v.string(),
     sandboxId: v.optional(v.string()),
+    status: v.optional(v.string()),
+    isRunning: v.optional(v.boolean()),
+    liveUrl: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   }).index("by_updatedAt", ["updatedAt"]),

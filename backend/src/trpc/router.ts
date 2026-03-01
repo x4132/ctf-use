@@ -1,6 +1,6 @@
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import { createSandbox, reconnectToSandbox, createOpenCodeSession, buildRules, deleteSandboxById } from "../agent/index.js";
+import { createSandbox, reconnectToSandbox, createOpenCodeSession, resumeOrCreateOpenCodeSession, buildRules, deleteSandboxById } from "../agent/index.js";
 import type { SandboxHandle, OpenCodeSession } from "../agent/index.js";
 import { getConvexClient, api } from "../convex.js";
 import type { Id } from "../../../convex/_generated/dataModel.js";
@@ -37,7 +37,10 @@ interface ChatSession {
 const chatSessions = new Map<string, ChatSession>();
 const chatInitializing = new Map<string, Promise<ChatSession>>();
 
-async function getOrCreateChatSession(chatId: string): Promise<ChatSession> {
+async function getOrCreateChatSession(
+  chatId: string,
+  onStatus?: (status: string) => void,
+): Promise<ChatSession> {
   const existing = chatSessions.get(chatId);
   if (existing) return existing;
 
@@ -54,9 +57,12 @@ async function getOrCreateChatSession(chatId: string): Promise<ChatSession> {
     });
 
     let sandbox;
+    let reconnected = false;
     if (chat?.sandboxId) {
       try {
-        sandbox = await reconnectToSandbox(chat.sandboxId, chatId);
+        onStatus?.("Reconnecting to sandbox...");
+        sandbox = await reconnectToSandbox(chat.sandboxId, chatId, onStatus);
+        reconnected = true;
       } catch (err) {
         console.warn(`[${chatId}] Failed to reconnect to sandbox ${chat.sandboxId}, creating new:`, err);
       }
@@ -65,7 +71,7 @@ async function getOrCreateChatSession(chatId: string): Promise<ChatSession> {
     if (!sandbox) {
       console.log(`[${chatId}] Creating new sandbox`);
       const rules = buildRules();
-      sandbox = await createSandbox(chatId, rules);
+      sandbox = await createSandbox(chatId, rules, undefined, onStatus);
 
       // Persist sandbox ID so it survives backend restarts
       await convex.mutation(api.chats.setSandboxId, {
@@ -75,7 +81,12 @@ async function getOrCreateChatSession(chatId: string): Promise<ChatSession> {
       console.log(`[${chatId}] Sandbox ID ${sandbox.sandbox.id} persisted`);
     }
 
-    const session = await createOpenCodeSession(sandbox.baseUrl, chatId);
+    onStatus?.("Starting session...");
+    const session = reconnected
+      ? await resumeOrCreateOpenCodeSession(sandbox.baseUrl, chatId)
+      : await createOpenCodeSession(sandbox.baseUrl, chatId);
+
+    onStatus?.("Sandbox active");
 
     const chatSession: ChatSession = { sandbox, session };
     chatSessions.set(chatId, chatSession);
@@ -113,44 +124,73 @@ const chatRouter = t.router({
         kind: "message" as const,
       });
 
-      // Post status if this is the first message (no session yet)
-      const isNew = !chatSessions.has(input.chatId) && !chatInitializing.has(input.chatId);
-      if (isNew) {
-        await convex.mutation(api.messages.create, {
+      // Mark chat as running immediately
+      convex.mutation(api.chats.setIsRunning, {
+        chatId,
+        isRunning: true,
+      }).catch((err) => {
+        console.error(`[${input.chatId}] Failed to set isRunning:`, err);
+      });
+
+      // Status updater — writes to the chat's status field in Convex
+      const setStatus = (status: string) => {
+        convex.mutation(api.chats.setStatus, {
           chatId,
-          role: "assistant" as const,
-          content: "Starting sandbox...",
-          kind: "status" as const,
+          status,
+        }).catch((err) => {
+          console.error(`[${input.chatId}] Failed to set status:`, err);
         });
-      }
+      };
+
+      const clearRunning = () => {
+        convex.mutation(api.chats.setIsRunning, {
+          chatId,
+          isRunning: false,
+        }).catch((err) => {
+          console.error(`[${input.chatId}] Failed to clear isRunning:`, err);
+        });
+      };
 
       // Get or bootstrap sandbox + session
       let chatSession: ChatSession;
       try {
-        chatSession = await getOrCreateChatSession(input.chatId);
+        chatSession = await getOrCreateChatSession(input.chatId, setStatus);
       } catch (err) {
         console.error(`[${input.chatId}] Failed to initialize sandbox:`, err);
-        await convex.mutation(api.messages.create, {
-          chatId,
-          role: "assistant" as const,
-          content: `Failed to start sandbox: ${err instanceof Error ? err.message : String(err)}`,
-          kind: "status" as const,
-        });
+        setStatus(`Failed to start sandbox: ${err instanceof Error ? err.message : String(err)}`);
+        clearRunning();
         return { ok: false as const };
       }
 
       // Send prompt in background — events stream to Convex inside session.sendMessage()
-      chatSession.session.sendMessage(input.message).catch(async (err) => {
-        console.error(`[${input.chatId}] sendMessage failed:`, err);
-        await convex.mutation(api.messages.create, {
-          chatId,
-          role: "assistant" as const,
-          content: `Error: ${err instanceof Error ? err.message : String(err)}`,
-          kind: "status" as const,
+      chatSession.session.sendMessage(input.message)
+        .then(() => {
+          clearRunning();
+        })
+        .catch(async (err) => {
+          console.error(`[${input.chatId}] sendMessage failed:`, err);
+          setStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
+          clearRunning();
         });
-      });
 
       return { ok: true as const };
+    }),
+
+  stop: loggedProcedure
+    .input(z.object({ chatId: z.string().min(1) }))
+    .mutation(async ({ input }) => {
+      const chatSession = chatSessions.get(input.chatId);
+      if (chatSession) {
+        await chatSession.session.abort();
+      }
+
+      const convex = getConvexClient();
+      await convex.mutation(api.chats.setIsRunning, {
+        chatId: input.chatId as Id<"chats">,
+        isRunning: false,
+      });
+
+      return { ok: true };
     }),
 
   destroy: loggedProcedure

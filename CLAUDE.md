@@ -63,7 +63,8 @@ pnpm exec tsc -p tsconfig.app.json   # from frontend/
 npx convex dev            # start Convex dev server (syncs schema + functions)
 
 # Add shadcn/ui components (from frontend/)
-pnpm dlx shadcn@latest add <component>
+# Use "echo n |" to avoid overwriting existing files (e.g., button.tsx)
+echo "n" | npx shadcn@latest add <component>
 ```
 
 ## Key Files
