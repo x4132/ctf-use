@@ -33,7 +33,7 @@ import { api } from "../../../convex/_generated/api";
 import type { ToolPart } from "@/components/ai-elements/tool";
 import type { Doc, Id } from "../../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
-import { Globe, Maximize2, Minimize2, X } from "lucide-react";
+import { Globe, Maximize2, Minimize2, Square, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const DEFAULT_CHAT_TITLE = "New chat";
@@ -134,19 +134,24 @@ export function ChatPage() {
       : (chatList[0]?._id ?? null);
   const selectedChat =
     chatList.find((chat) => chat._id === activeChatId) ?? null;
-  const liveUrl = selectedChat?.liveUrl ?? null;
+  const rawLiveUrl = selectedChat?.liveUrl ?? null;
+  const liveUrl = browserHidden ? null : rawLiveUrl;
+
+  // Reset local overrides when the underlying URL changes
+  if (!rawLiveUrl && browserHidden) {
+    setBrowserHidden(false);
+  }
+  if (!rawLiveUrl && browserFullscreen) {
+    setBrowserFullscreen(false);
+  }
 
   const handleCloseBrowser = () => {
     if (activeChatId) {
+      setBrowserHidden(true);
       setBrowserFullscreen(false);
       setLiveUrl({ chatId: activeChatId }).catch(console.error);
     }
   };
-
-  // Reset fullscreen when browser panel disappears
-  if (!liveUrl && browserFullscreen) {
-    setBrowserFullscreen(false);
-  }
 
   const messages =
     useQuery(
@@ -514,29 +519,36 @@ export function ChatPage() {
             <PromptInput onSubmit={handleSubmit}>
               <PromptInputBody>
                 <PromptInputTextarea
-                  disabled={sendMessage.isPending || !!selectedChat?.isRunning}
+                  disabled={sendMessage.isPending}
                   placeholder="Describe your CTF challenge..."
                 />
               </PromptInputBody>
               <PromptInputFooter>
                 <div />
-                <PromptInputSubmit
-                  disabled={sendMessage.isPending}
-                  status={
-                    sendMessage.isPending
-                      ? "submitted"
-                      : selectedChat?.isRunning
-                        ? "streaming"
-                        : "ready"
-                  }
-                  onStop={() => {
-                    if (activeChatId) {
-                      stopAgent
-                        .mutateAsync({ chatId: activeChatId })
-                        .catch(console.error);
-                    }
-                  }}
-                />
+                <div className="flex items-center gap-1">
+                  {selectedChat?.isRunning && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="size-8"
+                      onClick={() => {
+                        if (activeChatId) {
+                          stopAgent
+                            .mutateAsync({ chatId: activeChatId })
+                            .catch(console.error);
+                        }
+                      }}
+                      aria-label="Stop"
+                    >
+                      <Square className="size-3.5 fill-current" />
+                    </Button>
+                  )}
+                  <PromptInputSubmit
+                    disabled={sendMessage.isPending}
+                    status={sendMessage.isPending ? "submitted" : "ready"}
+                  />
+                </div>
               </PromptInputFooter>
             </PromptInput>
           </PromptInputProvider>
