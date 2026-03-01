@@ -213,6 +213,13 @@ export function ChatPage() {
 
   const handleDeleteChat = async (chatId: ChatId) => {
     try {
+      // Stop the agent first so the SSE stream exits before messages are deleted
+      await stopAgent.mutateAsync({ chatId });
+    } catch {
+      // best-effort — agent may not be running
+    }
+
+    try {
       // Destroy sandbox if one exists for this chat
       await destroySandbox.mutateAsync({ chatId });
     } catch {

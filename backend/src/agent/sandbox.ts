@@ -3,7 +3,7 @@ import type { Sandbox } from "@daytonaio/sdk";
 
 const OPENCODE_PORT = 4096;
 const OPENCODE_VERSION = "1.1.1";
-const DEFAULT_MODEL = "opencode/big-pickle";
+const DEFAULT_MODEL = "amazon-bedrock/anthropic.claude-opus-4-5";
 const READY_MARKER = "opencode server listening";
 const SERVER_TIMEOUT_MS = 90_000;
 const POLL_INTERVAL_MS = 1000;
@@ -31,7 +31,7 @@ async function startOpenCodeServer(
   }
 
   const command = await sandbox.process.executeSessionCommand(sessionId, {
-    command: `cd /home/daytona && BROWSER_USE_API_KEY=${process.env.BROWSER_USE_API_KEY ?? ""} OPENCODE_CONFIG=/home/daytona/opencode.json OPENCODE_DISABLE_MODELS_FETCH=true OPENCODE_DISABLE_AUTOUPDATE=true opencode serve --port ${OPENCODE_PORT} --hostname 0.0.0.0 2>&1`,
+    command: `cd /home/daytona && BROWSER_USE_API_KEY='${process.env.BROWSER_USE_API_KEY ?? ""}' OPENCODE_CONFIG=/home/daytona/opencode.json OPENCODE_DISABLE_MODELS_FETCH=true OPENCODE_DISABLE_AUTOUPDATE=true opencode serve --port ${OPENCODE_PORT} --hostname 0.0.0.0 2>&1`,
     runAsync: true,
   });
 
@@ -85,7 +85,6 @@ export async function createSandbox(
     permission: { "*": "allow" },
     autoupdate: false,
     share: "disabled",
-    model: model ?? DEFAULT_MODEL,
     mcp: {
       "browser-use": {
         type: "remote",
@@ -110,6 +109,25 @@ export async function createSandbox(
 
   onStatus?.("Starting OpenCode server...");
   const baseUrl = await startOpenCodeServer(sandbox, chatId);
+
+  // Authenticate with Amazon Bedrock (equivalent to /connect)
+  onStatus?.("Authenticating with Amazon Bedrock...");
+  await fetch(`${baseUrl}/auth/amazon-bedrock`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "api", key: process.env.AMAZON_BEDROCK_API_KEY ?? "" }),
+  });
+  console.log(`[${chatId}] Bedrock auth set`);
+
+  // Set model via API
+  onStatus?.("Setting model...");
+  await fetch(`${baseUrl}/config`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: model ?? DEFAULT_MODEL }),
+  });
+  console.log(`[${chatId}] Model set to ${model ?? DEFAULT_MODEL}`);
+
   onStatus?.("Sandbox ready");
 
   return {

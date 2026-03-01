@@ -70,6 +70,8 @@ export const updateContent = mutation({
     content: v.string(),
   },
   handler: async (ctx, args) => {
+    const msg = await ctx.db.get(args.messageId);
+    if (!msg) return;
     await ctx.db.patch(args.messageId, { content: args.content });
   },
 });

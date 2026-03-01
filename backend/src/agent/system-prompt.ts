@@ -13,7 +13,7 @@ Investigate the target and achieve the goal by methodically discovering and expl
 Follow this systematic approach:
 
 ### Phase 1: Reconnaissance
-- Use \`curl\` to fetch the target URL and observe the application structure
+- Visit the target and observe the application structure
 - Identify forms, input fields, cookies, headers, and technology stack
 - Check page source for HTML comments, hidden fields, and JavaScript
 - Look for robots.txt, sitemap.xml, and common sensitive paths (/admin, /.git, /.env, /backup)
@@ -29,6 +29,7 @@ Based on recon findings, test for:
 - **Source Code Leaks**: Look for .git exposure, backup files, debug endpoints
 - **Open Redirects**: Test redirect parameters with external URLs
 - **Command Injection**: If any OS command input is suspected
+- **Exposed Network**: E.g. Supabase, Firebase API leaks
 
 ### Phase 3: Exploitation
 - Deepen the most promising vulnerability

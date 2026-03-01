@@ -157,7 +157,8 @@ const chatRouter = t.router({
         chatSession = await getOrCreateChatSession(input.chatId, setStatus);
       } catch (err) {
         console.error(`[${input.chatId}] Failed to initialize sandbox:`, err);
-        setStatus(`Failed to start sandbox: ${err instanceof Error ? err.message : String(err)}`);
+        const errMsg = err instanceof Error ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
+        setStatus(`Failed to start sandbox: ${errMsg}`);
         clearRunning();
         return { ok: false as const };
       }
@@ -169,7 +170,8 @@ const chatRouter = t.router({
         })
         .catch(async (err) => {
           console.error(`[${input.chatId}] sendMessage failed:`, err);
-          setStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
+          const errMsg = err instanceof Error ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
+          setStatus(`Error: ${errMsg}`);
           clearRunning();
         });
 

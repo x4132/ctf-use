@@ -108,6 +108,9 @@ export const remove = mutation({
     chatId: v.id("chats"),
   },
   handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+
     const messages = await ctx.db
       .query("chatMessages")
       .withIndex("by_chatId_createdAt", (q) => q.eq("chatId", args.chatId))

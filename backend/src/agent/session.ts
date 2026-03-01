@@ -3,6 +3,12 @@ import type { Event } from "@opencode-ai/sdk";
 import { getConvexClient, api } from "../convex.js";
 import type { Id } from "../../../convex/_generated/dataModel.js";
 
+function errorToString(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  return JSON.stringify(err);
+}
+
 export interface OpenCodeSession {
   sessionId: string;
   sendMessage(text: string): Promise<void>;
@@ -211,9 +217,9 @@ async function consumeEvents(
 
       // Surface session-level errors to the client
       if (type === "session.error") {
-        const props = event.properties as { sessionID?: string; error?: string };
+        const props = event.properties as { sessionID?: string; error?: unknown };
         if (props.sessionID === sessionId) {
-          const errMsg = props.error ?? "Unknown session error";
+          const errMsg = props.error ? errorToString(props.error) : "Unknown session error";
           console.error(`[${chatId}] session.error:`, errMsg);
           writeError(`Session error: ${errMsg}`);
         }
@@ -335,7 +341,7 @@ async function consumeEvents(
 
     // Surface prompt errors to the client and re-throw
     if (promptError) {
-      const errMsg = promptError instanceof Error ? promptError.message : String(promptError);
+      const errMsg = errorToString(promptError);
       console.error(`[${chatId}] Prompt error:`, errMsg);
       await convex.mutation(api.messages.create, {
         chatId,
