@@ -69,3 +69,5 @@ When you make a mistake or learn something important during a session, update CL
 ### Lessons Learned
 
 - In `frontend/`, `pnpm exec tsc` can pass without checking app sources because `tsconfig.json` is solution-style with empty `files` and project references. Use `pnpm exec tsc -p tsconfig.app.json` to validate frontend source files directly.
+- If `pnpm --filter hacker-use-frontend ...` reports no matching projects, ensure `pnpm-workspace.yaml` includes `packages: [frontend]`.
+- Agent `activity` is a rolling window (max 60 lines), so persistence cursors cannot rely on array length. Use last-seen line matching (`lastActivityLine`) to append only new activity updates.

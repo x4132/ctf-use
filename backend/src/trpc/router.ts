@@ -1,71 +1,120 @@
 import { initTRPC } from '@trpc/server'
 import { z } from 'zod'
-import { TaskPool } from '../browser/pool.js'
+import { SecurityAgent } from '../agent/agent.js'
+import type { InvestigationResult } from '../agent/agent.js'
 
 const t = initTRPC.create()
 
-const pool = new TaskPool()
+// In-memory agent registry
+const agents = new Map<string, SecurityAgent>()
 
-const browserRouter = t.router({
-  runTask: t.procedure
+const agentRouter = t.router({
+  investigate: t.procedure
     .input(
       z.object({
-        prompt: z.string().min(1),
-        model: z.enum(['bu-mini', 'bu-max']).optional(),
-        sessionId: z.string().optional(),
-        keepAlive: z.boolean().optional(),
-        maxCostUsd: z.number().optional(),
+        targetUrl: z.string().url(),
+        goal: z.string().min(1),
+        context: z.string().optional(),
+        model: z.string().optional(),
+        maxSteps: z.number().int().positive().optional(),
+        mcpServers: z.array(z.string()).optional(),
       }),
     )
     .mutation(async ({ input }) => {
-      const { prompt, ...options } = input
-      const task = await pool.run(prompt, options)
+      const agent = new SecurityAgent({ model: input.model })
+      agents.set(agent.id, agent)
+
+      // Start investigation in the background
+      const promise = agent.investigate({
+        targetUrl: input.targetUrl,
+        goal: input.goal,
+        context: input.context,
+        model: input.model,
+        maxSteps: input.maxSteps,
+        mcpServers: input.mcpServers,
+      })
+
+      // Don't await — let it run. Client polls via getStatus.
+      promise.then(() => {
+        // Investigation complete — result is on the agent
+      }).catch(() => {
+        // Errors captured on the agent result
+      })
+
       return {
-        id: task.id,
-        sessionId: task.sessionId,
-        status: task.status,
-        output: task.output,
-        error: task.error,
-        signals: task.signals,
-        cost: task.cost,
-        liveUrl: task.liveUrl,
+        agentId: agent.id,
+        status: 'running' as const,
       }
     }),
 
-  poolStatus: t.procedure.query(() => {
-    const tasks = pool.getAllTasks()
-    return {
-      activeCount: pool.activeCount,
-      available: pool.available,
-      totalTracked: tasks.length,
-      signals: pool.getSignals(),
-      tasks: tasks.map((t) => ({
-        id: t.id,
-        status: t.status,
-        prompt: t.prompt.slice(0, 200),
-        cost: t.cost,
-        signalCount: t.signals.length,
-      })),
-    }
-  }),
-
-  stopSession: t.procedure
-    .input(
-      z.object({
-        sessionId: z.string(),
-        strategy: z.enum(['task', 'session']).optional(),
-      }),
-    )
-    .mutation(async ({ input }) => {
-      await pool.stopSession(input.sessionId, input.strategy ?? 'session')
-      return { ok: true }
+  getStatus: t.procedure
+    .input(z.object({ agentId: z.string() }))
+    .query(({ input }): InvestigationResult => {
+      const agent = agents.get(input.agentId)
+      if (!agent) {
+        return {
+          agentId: input.agentId,
+          status: 'failed',
+          output: null,
+          signals: [],
+          toolsCalled: [],
+          stepsUsed: 0,
+          activity: [],
+          lastActivityAt: null,
+          error: 'Agent not found',
+        }
+      }
+      return agent.getResult() ?? {
+        agentId: input.agentId,
+        status: 'running',
+        output: null,
+        signals: [],
+        toolsCalled: [],
+        stepsUsed: 0,
+        activity: [],
+        lastActivityAt: null,
+        error: null,
+      }
     }),
-})
 
-function extractUrl(text: string): string | null {
-  const match = text.match(/https?:\/\/[^\s]+/)
-  return match ? match[0] : null
-}
+  stop: t.procedure
+    .input(z.object({ agentId: z.string() }))
+    .mutation(({ input }) => {
+      const agent = agents.get(input.agentId)
+      if (!agent) return { ok: false, error: 'Agent not found' }
+      agent.stop()
+      return { ok: true, error: null }
+    }),
+
+  destroy: t.procedure
+    .input(z.object({ agentId: z.string() }))
+    .mutation(({ input }) => {
+      const agent = agents.get(input.agentId)
+      if (!agent) return { ok: false, error: 'Agent not found' }
+      agent.destroy()
+      agents.delete(input.agentId)
+      return { ok: true, error: null }
+    }),
+
+  list: t.procedure.query(() => {
+    const entries: Array<{
+      agentId: string
+      status: InvestigationResult['status']
+      stepsUsed: number
+      signalCount: number
+    }> = []
+    for (const [id, agent] of agents) {
+      const result = agent.getResult()
+      entries.push({
+        agentId: id,
+        status: result?.status ?? 'running',
+        stepsUsed: result?.stepsUsed ?? 0,
+        signalCount: result?.signals.length ?? 0,
+      })
+    }
+    return { agents: entries }
+  }),
+})
 
 const chatRouter = t.router({
   send: t.procedure
@@ -90,6 +139,11 @@ const chatRouter = t.router({
     }),
 })
 
+function extractUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/[^\s]+/)
+  return match ? match[0] : null
+}
+
 export const appRouter = t.router({
   health: t.procedure.query(() => ({
     status: 'ok',
@@ -106,7 +160,7 @@ export const appRouter = t.router({
     .query(({ input }) => ({
       message: `Hello ${input?.name ?? 'world'}!`,
     })),
-  browser: browserRouter,
+  agent: agentRouter,
   chat: chatRouter,
 })
 

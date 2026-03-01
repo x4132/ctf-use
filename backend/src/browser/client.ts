@@ -1,4 +1,4 @@
-import { BrowserUse } from "browser-use-sdk/v3";
+import { BrowserUse } from "browser-use-sdk";
 
 let _client: BrowserUse | null = null;
 

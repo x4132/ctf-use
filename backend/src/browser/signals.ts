@@ -54,7 +54,7 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
       /You have an error in your SQL syntax/i,
     ],
     confidence: "high",
-    followUp: (match) => [
+    followUp: (_match) => [
       `Attempt UNION-based SQL injection to extract data`,
       `Try boolean-based blind SQLi to enumerate tables`,
       `Check for time-based blind SQLi with SLEEP/WAITFOR`,
@@ -95,7 +95,7 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
       /reflected.*(?:without|no).*(?:encoding|escaping|sanitiz)/i,
     ],
     confidence: "high",
-    followUp: (match) => [
+    followUp: (_match) => [
       `Craft a payload to steal cookies or session tokens`,
       `Test for stored XSS by submitting persistent payloads`,
       `Check if CSP headers block script execution`,
@@ -166,7 +166,7 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
       /(?:private|secret).*key.*(?:found|exposed|visible|leaked)/i,
     ],
     confidence: "medium",
-    followUp: (match) => [
+    followUp: (_match) => [
       `Use the exposed credentials to access protected resources`,
       `Check if the leaked key grants access to other services`,
     ],
@@ -179,7 +179,7 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
       /(?:status|response)\s*(?:code)?:?\s*200.*(?:admin|debug|backup|config)/i,
     ],
     confidence: "medium",
-    followUp: (match) => [
+    followUp: (_match) => [
       `Navigate to the hidden endpoint and inspect its contents`,
       `Check for sensitive configuration or source code exposure`,
     ],

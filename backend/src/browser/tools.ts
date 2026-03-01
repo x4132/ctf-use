@@ -1,210 +1,261 @@
-import { tool } from "ai";
-import { z } from "zod";
-import type { TaskPool } from "./pool.js";
-import * as presets from "./presets.js";
+import type { Tool } from "dedalus-labs/lib/runner/index.js";
+import type { JSONSchema } from "dedalus-labs/lib/utils/schemas.js";
+import type { SessionView, TaskResult, TaskStepView } from "browser-use-sdk";
+import { getBrowserClient } from "./client.js";
+import { extractSignals, type Signal } from "./signals.js";
 
-export function createBrowserTools(pool: TaskPool) {
-  return {
-    browser_navigate: tool({
+type ToolMetadata = {
+  description: string;
+  parameters: JSONSchema;
+};
+
+type ToolWithMetadata<TArgs, TResult> = Tool & {
+  (args: TArgs): Promise<TResult>;
+  description: string;
+  parameters: JSONSchema;
+};
+
+function defineTool<TArgs, TResult>(
+  fn: (args: TArgs) => Promise<TResult>,
+  metadata: ToolMetadata,
+): ToolWithMetadata<TArgs, TResult> {
+  const tool = fn as ToolWithMetadata<TArgs, TResult>;
+  tool.description = metadata.description;
+  tool.parameters = metadata.parameters;
+  return tool;
+}
+
+interface BrowserRunTaskArgs {
+  task: string;
+  startUrl?: string;
+  sessionId?: string;
+  maxSteps?: number;
+}
+
+interface BrowserTaskStep {
+  number: number;
+  nextGoal: string;
+  url: string;
+  actions: string[];
+}
+
+type BrowserTaskSignal = Pick<
+  Signal,
+  "type" | "confidence" | "details" | "evidence" | "suggestedFollowUps"
+>;
+
+interface BrowserRunTaskResult {
+  taskId: TaskResult["id"];
+  sessionId: TaskResult["sessionId"];
+  status: TaskResult["status"];
+  output: string;
+  steps: BrowserTaskStep[];
+  stepsUsed: number;
+  signals: BrowserTaskSignal[];
+}
+
+interface BrowserCreateSessionArgs {
+  persistMemory?: boolean;
+  keepAlive?: boolean;
+  startUrl?: string;
+}
+
+interface BrowserSessionSummary {
+  sessionId: SessionView["id"];
+  status: SessionView["status"];
+  liveUrl: string | null;
+}
+
+interface BrowserGetSessionArgs {
+  sessionId: string;
+}
+
+interface BrowserGetSessionResult extends BrowserSessionSummary {
+  startedAt: SessionView["startedAt"];
+  finishedAt: string | null;
+  persistMemory: SessionView["persistMemory"];
+  keepAlive: SessionView["keepAlive"];
+}
+
+interface BrowserStopSessionArgs {
+  sessionId: string;
+}
+
+interface BrowserStopSessionResult {
+  sessionId: SessionView["id"];
+  status: SessionView["status"];
+}
+
+type BrowserToolName =
+  | "browser_run_task"
+  | "browser_create_session"
+  | "browser_get_session"
+  | "browser_stop_session";
+
+export interface BrowserToolProgressEvent {
+  tool: BrowserToolName;
+  phase: "start" | "step" | "end";
+  message: string;
+}
+
+export interface BrowserToolHooks {
+  onEvent?: (event: BrowserToolProgressEvent) => void;
+}
+
+function emitToolEvent(
+  hooks: BrowserToolHooks | undefined,
+  event: BrowserToolProgressEvent,
+): void {
+  hooks?.onEvent?.(event);
+}
+
+const DEFAULT_BROWSER_TASK_MAX_STEPS = 15;
+const DEFAULT_BROWSER_TASK_TIMEOUT_MS = 45_000;
+
+const browserRunTaskParameters = {
+  type: "object",
+  properties: {
+    task: {
+      type: "string",
+      description: "Natural language instruction for what the browser should do",
+    },
+    startUrl: {
+      type: "string",
       description:
-        "Navigate a cloud browser to a URL and perform a task. The browser agent executes autonomously. " +
-        "Use for any web interaction: reading pages, filling forms, clicking buttons, extracting content.",
-      inputSchema: z.object({
-        task: z.string().describe("Natural language instruction for what the browser should do"),
-        startUrl: z.string().optional().describe("URL to start from (include in the task description too)"),
-        model: z.enum(["bu-mini", "bu-max"]).optional().describe("bu-mini (fast/cheap) or bu-max (more capable). Default: bu-mini"),
-        maxCostUsd: z.number().optional().describe("Cost cap in USD. Agent stops if exceeded"),
-        sessionId: z.string().optional().describe("Reuse an existing session for follow-up tasks"),
-        keepAlive: z.boolean().optional().describe("Keep session alive after task for follow-ups"),
-      }),
-      execute: async ({ task, startUrl, model, maxCostUsd, sessionId, keepAlive }) => {
-        const prompt = startUrl ? `Navigate to ${startUrl}. ${task}` : task;
-        const result = await pool.run(prompt, { model, maxCostUsd, sessionId, keepAlive });
+        "URL to start from. Include this in the task description too for best results",
+    },
+    sessionId: {
+      type: "string",
+      description:
+        "Reuse an existing browser session for follow-up tasks. Enables multi-step investigations",
+    },
+    maxSteps: {
+      type: "number",
+      description: "Maximum number of browser agent steps. Default: 15",
+    },
+  },
+  required: ["task"],
+  additionalProperties: false,
+} satisfies JSONSchema;
+
+const browserCreateSessionParameters = {
+  type: "object",
+  properties: {
+    persistMemory: {
+      type: "boolean",
+      description: "Share memory/history between tasks in this session. Default: true",
+    },
+    keepAlive: {
+      type: "boolean",
+      description: "Keep the browser alive after tasks complete. Default: true",
+    },
+    startUrl: {
+      type: "string",
+      description: "URL to navigate to when the session starts",
+    },
+  },
+  required: [],
+  additionalProperties: false,
+} satisfies JSONSchema;
+
+const browserGetSessionParameters = {
+  type: "object",
+  properties: {
+    sessionId: {
+      type: "string",
+      description: "The session ID to look up",
+    },
+  },
+  required: ["sessionId"],
+  additionalProperties: false,
+} satisfies JSONSchema;
+
+const browserStopSessionParameters = {
+  type: "object",
+  properties: {
+    sessionId: {
+      type: "string",
+      description: "The session ID to stop",
+    },
+  },
+  required: ["sessionId"],
+  additionalProperties: false,
+} satisfies JSONSchema;
+
+/**
+ * Run a browser-use task with natural language instructions.
+ * Main tool for web interaction: navigating pages, filling forms, clicking buttons, extracting content.
+ * The browser agent executes autonomously in a cloud browser.
+ * Returns the task output, steps taken, cost, and any security signals detected.
+ */
+function createBrowserRunTaskTool(
+  hooks?: BrowserToolHooks,
+): ToolWithMetadata<BrowserRunTaskArgs, BrowserRunTaskResult> {
+  return defineTool(
+    async function browser_run_task(
+      args: BrowserRunTaskArgs,
+    ): Promise<BrowserRunTaskResult> {
+      emitToolEvent(hooks, {
+        tool: "browser_run_task",
+        phase: "start",
+        message: `Starting browser task: ${args.task.slice(0, 180)}`,
+      });
+
+      try {
+        const client = getBrowserClient();
+
+        const taskRun = client.run(args.task, {
+          startUrl: args.startUrl,
+          sessionId: args.sessionId,
+          maxSteps: args.maxSteps ?? DEFAULT_BROWSER_TASK_MAX_STEPS,
+          timeout: DEFAULT_BROWSER_TASK_TIMEOUT_MS,
+        });
+
+        // Collect steps via async iteration
+        const steps: BrowserTaskStep[] = [];
+
+        for await (const step of taskRun as AsyncIterable<TaskStepView>) {
+          steps.push({
+            number: step.number,
+            nextGoal: step.nextGoal,
+            url: step.url,
+            actions: step.actions,
+          });
+
+          emitToolEvent(hooks, {
+            tool: "browser_run_task",
+            phase: "step",
+            message: `Browser step ${step.number}: ${step.nextGoal || "continuing"} (${step.url})`,
+          });
+        }
+
+        const result: TaskResult | null = taskRun.result;
+        if (!result) {
+          throw new Error("browser_run_task completed without a task result");
+        }
+
+        const output =
+          typeof result.output === "string"
+            ? result.output
+            : result.output == null
+              ? ""
+              : JSON.stringify(result.output);
+
+        const signals = output ? extractSignals(result.id, args.task, output) : [];
+
+        emitToolEvent(hooks, {
+          tool: "browser_run_task",
+          phase: "end",
+          message: `Browser task finished with status ${result.status} after ${result.steps.length} steps.`,
+        });
+
         return {
-          output: result.output,
-          status: result.status,
-          cost: result.cost,
-          liveUrl: result.liveUrl,
+          taskId: result.id,
           sessionId: result.sessionId,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_recon: tool({
-      description:
-        "Perform web reconnaissance on a target URL. Discovers forms, cookies, headers, " +
-        "tech stack, links, and JavaScript files. Use as a first step when investigating a target.",
-      inputSchema: z.object({
-        targetUrl: z.string().describe("The URL to perform reconnaissance on"),
-      }),
-      execute: async ({ targetUrl }) => {
-        const task = presets.recon(targetUrl);
-        const result = await pool.run(task.prompt, task.options);
-        return {
-          output: result.output,
           status: result.status,
-          cost: result.cost,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_xss_probe: tool({
-      description:
-        "Test a URL parameter for Cross-Site Scripting (XSS) vulnerabilities by injecting " +
-        "common test payloads and checking if they are reflected unescaped.",
-      inputSchema: z.object({
-        targetUrl: z.string().describe("The URL to test for XSS"),
-        paramName: z.string().describe("The parameter name to inject payloads into"),
-      }),
-      execute: async ({ targetUrl, paramName }) => {
-        const task = presets.xssProbe(targetUrl, paramName);
-        const result = await pool.run(task.prompt, task.options);
-        return {
-          output: result.output,
-          status: result.status,
-          cost: result.cost,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_sqli_probe: tool({
-      description:
-        "Test a URL parameter for SQL Injection vulnerabilities using diagnostic payloads " +
-        "including error-based, boolean-based, UNION-based, and time-based techniques.",
-      inputSchema: z.object({
-        targetUrl: z.string().describe("The URL to test for SQL injection"),
-        paramName: z.string().describe("The parameter name to inject payloads into"),
-      }),
-      execute: async ({ targetUrl, paramName }) => {
-        const task = presets.sqliProbe(targetUrl, paramName);
-        const result = await pool.run(task.prompt, task.options);
-        return {
-          output: result.output,
-          status: result.status,
-          cost: result.cost,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_source_analysis: tool({
-      description:
-        "Analyze a web page's source code for sensitive information: HTML comments, " +
-        "hidden fields, hardcoded secrets, debug artifacts, robots.txt, and flag patterns.",
-      inputSchema: z.object({
-        targetUrl: z.string().describe("The URL to analyze"),
-      }),
-      execute: async ({ targetUrl }) => {
-        const task = presets.sourceAnalysis(targetUrl);
-        const result = await pool.run(task.prompt, task.options);
-        return {
-          output: result.output,
-          status: result.status,
-          cost: result.cost,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_form_submit: tool({
-      description:
-        "Submit a web form with specified field values. Useful for testing login forms, " +
-        "search inputs, or any form-based interaction with crafted payloads.",
-      inputSchema: z.object({
-        targetUrl: z.string().describe("URL where the form is located"),
-        formSelector: z.string().describe("CSS selector or description to identify the form"),
-        fields: z.record(z.string(), z.string()).describe("Field name-value pairs to fill in"),
-      }),
-      execute: async ({ targetUrl, formSelector, fields }) => {
-        const task = presets.formSubmit(targetUrl, formSelector, fields);
-        const result = await pool.run(task.prompt, task.options);
-        return {
-          output: result.output,
-          status: result.status,
-          cost: result.cost,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_cookie_analysis: tool({
-      description:
-        "Analyze cookies and session tokens at a URL. Inspects cookie flags, " +
-        "decodes base64/JWT values, and checks for session security issues.",
-      inputSchema: z.object({
-        targetUrl: z.string().describe("The URL to analyze cookies for"),
-      }),
-      execute: async ({ targetUrl }) => {
-        const task = presets.cookieAnalysis(targetUrl);
-        const result = await pool.run(task.prompt, task.options);
-        return {
-          output: result.output,
-          status: result.status,
-          cost: result.cost,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_path_discovery: tool({
-      description:
-        "Check common sensitive paths at a target URL (robots.txt, .git, .env, admin, flag, etc). " +
-        "Reports which paths are accessible with HTTP status codes and content summaries.",
-      inputSchema: z.object({
-        targetUrl: z.string().describe("The base URL to check paths against"),
-      }),
-      execute: async ({ targetUrl }) => {
-        const task = presets.pathDiscovery(targetUrl);
-        const result = await pool.run(task.prompt, task.options);
-        return {
-          output: result.output,
-          status: result.status,
-          cost: result.cost,
-          signals: result.signals,
-        };
-      },
-    }),
-
-    browser_parallel: tool({
-      description:
-        "Run multiple browser tasks in parallel. Use when you need to probe multiple " +
-        "URLs or test multiple payloads simultaneously for efficiency. Each task gets its own browser.",
-      inputSchema: z.object({
-        tasks: z.array(z.object({
-          task: z.string().describe("Natural language instruction for the browser"),
-          startUrl: z.string().optional().describe("URL to start from"),
-          model: z.enum(["bu-mini", "bu-max"]).optional().describe("Model to use for this task"),
-        })).min(1).max(10).describe("Array of tasks to run in parallel"),
-      }),
-      execute: async ({ tasks }) => {
-        const results = await pool.runAll(
-          tasks.map((t) => ({
-            prompt: t.startUrl ? `Navigate to ${t.startUrl}. ${t.task}` : t.task,
-            options: t.model ? { model: t.model as "bu-mini" | "bu-max" } : undefined,
-          })),
-        );
-        return results.map((r) => ({
-          prompt: r.prompt,
-          output: r.output,
-          status: r.status,
-          cost: r.cost,
-          signals: r.signals,
-        }));
-      },
-    }),
-
-    browser_check_signals: tool({
-      description:
-        "Return all signals/findings collected from browser tasks so far. " +
-        "Use to review what vulnerabilities or interesting findings have been detected across all tasks.",
-      inputSchema: z.object({}),
-      execute: async () => {
-        const signals = pool.getSignals();
-        return {
-          count: signals.length,
+          output,
+          steps,
+          stepsUsed: result.steps.length,
           signals: signals.map((s) => ({
             type: s.type,
             confidence: s.confidence,
@@ -213,7 +264,159 @@ export function createBrowserTools(pool: TaskPool) {
             suggestedFollowUps: s.suggestedFollowUps,
           })),
         };
-      },
-    }),
-  };
+      } catch (err) {
+        emitToolEvent(hooks, {
+          tool: "browser_run_task",
+          phase: "end",
+          message: `Browser task failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        throw err;
+      }
+    },
+    {
+      description:
+        "Run a browser-use task with natural language instructions. " +
+        "The browser agent navigates pages, fills forms, clicks buttons, and extracts content autonomously. " +
+        "Returns the task output, execution steps, and any security signals detected.",
+      parameters: browserRunTaskParameters,
+    },
+  );
+}
+
+/**
+ * Create a persistent browser session for multi-step investigations.
+ * Returns a sessionId that can be passed to browser_run_task for follow-up tasks.
+ */
+function createBrowserCreateSessionTool(
+  hooks?: BrowserToolHooks,
+): ToolWithMetadata<BrowserCreateSessionArgs, BrowserSessionSummary> {
+  return defineTool(
+    async function browser_create_session(
+      args: BrowserCreateSessionArgs,
+    ): Promise<BrowserSessionSummary> {
+      emitToolEvent(hooks, {
+        tool: "browser_create_session",
+        phase: "start",
+        message: "Creating browser session.",
+      });
+
+      const client = getBrowserClient();
+
+      const session = await client.sessions.create({
+        persistMemory: args.persistMemory ?? true,
+        keepAlive: args.keepAlive ?? true,
+        startUrl: args.startUrl,
+      });
+
+      emitToolEvent(hooks, {
+        tool: "browser_create_session",
+        phase: "end",
+        message: `Created session ${session.id}.`,
+      });
+
+      return {
+        sessionId: session.id,
+        status: session.status,
+        liveUrl: session.liveUrl ?? null,
+      };
+    },
+    {
+      description:
+        "Create a persistent browser session for multi-step investigations. " +
+        "Returns a sessionId to pass to browser_run_task for follow-up tasks that share browser state.",
+      parameters: browserCreateSessionParameters,
+    },
+  );
+}
+
+/**
+ * Get the status and details of a browser session.
+ */
+function createBrowserGetSessionTool(
+  hooks?: BrowserToolHooks,
+): ToolWithMetadata<BrowserGetSessionArgs, BrowserGetSessionResult> {
+  return defineTool(
+    async function browser_get_session(
+      args: BrowserGetSessionArgs,
+    ): Promise<BrowserGetSessionResult> {
+      emitToolEvent(hooks, {
+        tool: "browser_get_session",
+        phase: "start",
+        message: `Checking session ${args.sessionId}.`,
+      });
+
+      const client = getBrowserClient();
+      const session = await client.sessions.get(args.sessionId);
+
+      emitToolEvent(hooks, {
+        tool: "browser_get_session",
+        phase: "end",
+        message: `Session ${session.id} is ${session.status}.`,
+      });
+
+      return {
+        sessionId: session.id,
+        status: session.status,
+        liveUrl: session.liveUrl ?? null,
+        startedAt: session.startedAt,
+        finishedAt: session.finishedAt ?? null,
+        persistMemory: session.persistMemory,
+        keepAlive: session.keepAlive,
+      };
+    },
+    {
+      description: "Get the current status, live URL, and details of a browser session.",
+      parameters: browserGetSessionParameters,
+    },
+  );
+}
+
+/**
+ * Stop a browser session or its running task.
+ */
+function createBrowserStopSessionTool(
+  hooks?: BrowserToolHooks,
+): ToolWithMetadata<BrowserStopSessionArgs, BrowserStopSessionResult> {
+  return defineTool(
+    async function browser_stop_session(
+      args: BrowserStopSessionArgs,
+    ): Promise<BrowserStopSessionResult> {
+      emitToolEvent(hooks, {
+        tool: "browser_stop_session",
+        phase: "start",
+        message: `Stopping session ${args.sessionId}.`,
+      });
+
+      const client = getBrowserClient();
+      const session = await client.sessions.stop(args.sessionId);
+
+      emitToolEvent(hooks, {
+        tool: "browser_stop_session",
+        phase: "end",
+        message: `Stopped session ${session.id}.`,
+      });
+
+      return {
+        sessionId: session.id,
+        status: session.status,
+      };
+    },
+    {
+      description:
+        "Stop a browser session and all its running tasks. Use when done investigating or to free resources.",
+      parameters: browserStopSessionParameters,
+    },
+  );
+}
+
+/**
+ * Returns all browser-use tools as an array compatible with DedalusRunner.
+ */
+export function getBrowserTools(hooks?: BrowserToolHooks): Tool[] {
+  return [
+    createBrowserRunTaskTool(hooks),
+    createBrowserCreateSessionTool(hooks),
+    createBrowserGetSessionTool(hooks),
+    createBrowserStopSessionTool(hooks),
+  ];
 }

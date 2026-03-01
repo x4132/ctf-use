@@ -4,11 +4,9 @@
   "private": true,
   "description": "Hacker Use monorepo",
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c blue,green \"pnpm run backend:dev\" \"pnpm --filter hacker-use-frontend dev\"",
-    "start": "concurrently -n backend,frontend -c blue,green \"pnpm run backend:start\" \"pnpm --filter hacker-use-frontend preview\"",
-    "backend:dev": "bun --watch backend/src/index.ts",
-    "backend:start": "bun backend/src/index.ts",
-    "backend:typecheck": "bunx tsc -p backend/tsconfig.json --noEmit",
+    "dev": "concurrently -n backend,frontend -c blue,green \"bun --watch backend/src/index.ts\" \"pnpm --filter hacker-use-frontend dev\"",
+    "start": "concurrently -n backend,frontend -c blue,green \"bun backend/src/index.ts\" \"pnpm --filter hacker-use-frontend preview\"",
+    "typecheck": "bunx tsc -p backend/tsconfig.json --noEmit && pnpm --filter hacker-use-frontend exec tsc -p tsconfig.app.json --noEmit",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "packageManager": "pnpm@10.11.0",
@@ -17,6 +15,7 @@
     "@trpc/server": "^11.10.0",
     "browser-use-sdk": "^3.1.0",
     "concurrently": "^9.2.1",
+    "convex": "^1.32.0",
     "dedalus-labs": "0.1.0-alpha.8",
     "hono": "^4.12.3",
     "zod": "^4.3.6"
