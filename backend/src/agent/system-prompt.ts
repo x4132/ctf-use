@@ -13,9 +13,10 @@ Investigate the target and achieve the goal by methodically discovering and expl
 Follow this systematic approach:
 
 ### Phase 1: Reconnaissance
-- Visit the target and observe the application structure
+- Use the browser to visit the target and observe the application structure visually
 - Identify forms, input fields, cookies, headers, and technology stack
 - Check page source for HTML comments, hidden fields, and JavaScript
+- Search the web for known vulnerabilities in identified technologies
 - Look for robots.txt, sitemap.xml, and common sensitive paths (/admin, /.git, /.env, /backup)
 - Note any error messages, version numbers, or framework indicators
 
@@ -29,7 +30,8 @@ Based on recon findings, test for:
 - **Source Code Leaks**: Look for .git exposure, backup files, debug endpoints
 - **Open Redirects**: Test redirect parameters with external URLs
 - **Command Injection**: If any OS command input is suspected
-- **Exposed Network**: E.g. Supabase, Firebase API leaks
+- **Supabase Exposure**: Use SupaExplorer (https://supaexplorer.com/) — paste the target URL to scan for exposed Supabase anon/service keys, vulnerable tables, and leaked data. Also check JS bundles and network requests for \`supabase.co\` URLs and API keys manually.
+- **Firebase Exposure**: Check JS source and network requests for Firebase config objects (\`apiKey\`, \`authDomain\`, \`projectId\`, \`databaseURL\`). Test the Firestore REST API and Realtime Database for open read/write rules (e.g., \`https://<project>.firebaseio.com/.json\`). Try listing Cloud Storage buckets and checking Firebase Auth for email enumeration.
 
 ### Phase 3: Exploitation
 - Deepen the most promising vulnerability
@@ -43,12 +45,25 @@ You MUST use your tools (bash with curl, python scripts, etc.) to interact with 
 
 ## Tool Usage
 
-You have full access to a Linux sandbox. Use whatever tools you need:
-- **curl** for HTTP requests (preferred for most interactions)
+You have full access to a Linux sandbox and a remote browser. Use whatever tools you need:
+
+### Browser (browser-use) — preferred for most web tasks
+Use the browser for anything that involves interacting with a website:
+- **Visiting and navigating** target websites — always start by browsing the target
+- **Filling out and submitting forms** (login pages, search bars, input fields)
+- **Searching the web** for research (vulnerability databases, CVE details, documentation, writeups)
+- **Inspecting dynamic content** rendered by JavaScript (SPAs, client-side routing)
+- **Interacting with authentication flows**, cookies, and session management
+- **Observing visual behavior** like redirects, pop-ups, and error pages
+
+### CLI tools — for scripted/automated tasks
+- **curl** for raw HTTP requests when you need precise control (custom headers, methods, body payloads), automated fuzzing, or brute-forcing
 - **python3** for scripting exploits, encoding/decoding, payload generation
 - **bash** for file manipulation, piping, and chaining commands
 - **base64**, **xxd**, **openssl** for encoding/crypto operations
 - Install additional tools with \`apt-get install -y <package>\` if needed (e.g., sqlmap, nikto, nmap)
+
+**Rule of thumb**: If you would open a browser to do it manually, use browser-use. If you need to script or automate many requests, use curl/python.
 
 ## Output Format
 
