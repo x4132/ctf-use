@@ -1,6 +1,6 @@
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import { createSandbox, reconnectToSandbox, createOpenCodeSession, resumeOrCreateOpenCodeSession, buildRules, deleteSandboxById } from "../agent/index.js";
+import { createSandbox, reconnectToSandbox, createOpenCodeSession, resumeOrCreateOpenCodeSession, buildRules, deleteSandboxById, stopSandboxById } from "../agent/index.js";
 import type { SandboxHandle, OpenCodeSession } from "../agent/index.js";
 import { getConvexClient, api } from "../convex.js";
 import type { Id } from "../../../convex/_generated/dataModel.js";
@@ -163,6 +163,14 @@ const chatRouter = t.router({
         return { ok: false as const };
       }
 
+      // Clear sandboxStopped flag if it was set (auto-started by sending a message)
+      convex.mutation(api.chats.setSandboxStopped, {
+        chatId,
+        sandboxStopped: false,
+      }).catch((err) => {
+        console.error(`[${input.chatId}] Failed to clear sandboxStopped:`, err);
+      });
+
       // Send prompt in background — events stream to Convex inside session.sendMessage()
       chatSession.session.sendMessage(input.message)
         .then(() => {
@@ -191,6 +199,72 @@ const chatRouter = t.router({
         chatId: input.chatId as Id<"chats">,
         isRunning: false,
       });
+
+      return { ok: true };
+    }),
+
+  stopSandbox: loggedProcedure
+    .input(z.object({ chatId: z.string().min(1) }))
+    .mutation(async ({ input }) => {
+      const convex = getConvexClient();
+      const chatId = input.chatId as Id<"chats">;
+
+      // Abort OpenCode session if running
+      const chatSession = chatSessions.get(input.chatId);
+      if (chatSession) {
+        try { await chatSession.session.abort(); } catch { /* best-effort */ }
+      }
+
+      // Clear in-memory session (sandbox will be stopped, so the session is invalid)
+      chatSessions.delete(input.chatId);
+
+      // Look up sandbox ID from Convex and stop it
+      const chat = await convex.query(api.chats.get, { chatId });
+      if (chat?.sandboxId) {
+        await stopSandboxById(chat.sandboxId);
+      }
+
+      // Update Convex state
+      await Promise.all([
+        convex.mutation(api.chats.setSandboxStopped, { chatId, sandboxStopped: true }),
+        convex.mutation(api.chats.setIsRunning, { chatId, isRunning: false }),
+        convex.mutation(api.chats.setStatus, { chatId, status: "Sandbox stopped" }),
+      ]);
+
+      return { ok: true };
+    }),
+
+  startSandbox: loggedProcedure
+    .input(z.object({ chatId: z.string().min(1) }))
+    .mutation(async ({ input }) => {
+      const convex = getConvexClient();
+      const chatId = input.chatId as Id<"chats">;
+
+      const setStatus = (status: string) => {
+        convex.mutation(api.chats.setStatus, { chatId, status }).catch((err) => {
+          console.error(`[${input.chatId}] Failed to set status:`, err);
+        });
+      };
+
+      setStatus("Starting sandbox...");
+
+      try {
+        await getOrCreateChatSession(input.chatId, setStatus);
+      } catch (err) {
+        console.error(`[${input.chatId}] Failed to start sandbox:`, err);
+        const errMsg = err instanceof Error ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
+        await convex.mutation(api.chats.setStatus, {
+          chatId,
+          status: `Failed to start sandbox: ${errMsg}`,
+        });
+        throw err;
+      }
+
+      // Clear the stopped flag and update status
+      await Promise.all([
+        convex.mutation(api.chats.setSandboxStopped, { chatId, sandboxStopped: false }),
+        convex.mutation(api.chats.setStatus, { chatId, status: "Sandbox active" }),
+      ]);
 
       return { ok: true };
     }),

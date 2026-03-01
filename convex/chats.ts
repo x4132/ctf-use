@@ -88,6 +88,18 @@ export const setIsRunning = mutation({
   },
 });
 
+export const setSandboxStopped = mutation({
+  args: {
+    chatId: v.id("chats"),
+    sandboxStopped: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat) return;
+    await ctx.db.patch(args.chatId, { sandboxStopped: args.sandboxStopped });
+  },
+});
+
 export const setLiveUrl = mutation({
   args: {
     chatId: v.id("chats"),

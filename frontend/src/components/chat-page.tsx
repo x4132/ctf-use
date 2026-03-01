@@ -28,12 +28,18 @@ import {
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { trpc } from "@/lib/trpc";
 import { api } from "../../../convex/_generated/api";
 import type { ToolPart } from "@/components/ai-elements/tool";
 import type { Doc, Id } from "../../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
-import { Globe, Maximize2, Minimize2, Square, X } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
+import { BrainIcon, ChevronDownIcon, Globe, Maximize2, Minimize2, Pause, Play, Square, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const DEFAULT_CHAT_TITLE = "New chat";
@@ -116,6 +122,8 @@ export function ChatPage() {
   const removeChat = useMutation(api.chats.remove);
   const sendMessage = trpc.chat.send.useMutation();
   const stopAgent = trpc.chat.stop.useMutation();
+  const stopSandbox = trpc.chat.stopSandbox.useMutation();
+  const startSandbox = trpc.chat.startSandbox.useMutation();
   const destroySandbox = trpc.chat.destroy.useMutation();
   const setLiveUrl = useMutation(api.chats.setLiveUrl);
   const [selectedChatId, setSelectedChatId] = useState<ChatId | null>(null);
@@ -268,18 +276,21 @@ export function ChatPage() {
     errorText: ToolPart["errorText"];
   };
   type MessageItem = { type: "message"; msg: (typeof messages)[number] };
+  type ReasoningItem = { type: "reasoning"; msg: (typeof messages)[number] };
   type ToolGroup = {
     type: "toolGroup";
     key: string;
     toolName: string;
     items: { msg: (typeof messages)[number]; data: ToolData }[];
   };
-  type RenderItem = MessageItem | ToolGroup;
+  type RenderItem = MessageItem | ToolGroup | ReasoningItem;
 
   const renderItems = useMemo<RenderItem[]>(() => {
     const items: RenderItem[] = [];
     for (const msg of messages) {
-      if (msg.kind === "tool") {
+      if (msg.kind === "reasoning") {
+        items.push({ type: "reasoning", msg });
+      } else if (msg.kind === "tool") {
         try {
           const data = JSON.parse(msg.content) as ToolData;
           const lastItem = items[items.length - 1];
@@ -499,6 +510,28 @@ export function ChatPage() {
                   );
                 }
 
+                if (item.type === "reasoning") {
+                  return (
+                    <Collapsible
+                      key={item.msg._id}
+                      className="group/thinking mb-2 w-full max-w-[95%] rounded-md border border-border/50"
+                    >
+                      <CollapsibleTrigger className="flex w-full items-center justify-between gap-2 px-3 py-2">
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <BrainIcon className="size-4" />
+                          <span className="text-xs font-medium">Thinking</span>
+                        </div>
+                        <ChevronDownIcon className="size-3.5 text-muted-foreground transition-transform group-data-[state=open]/thinking:rotate-180" />
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className="px-3 pb-3">
+                        <div className="text-xs text-muted-foreground italic">
+                          <MessageResponse>{item.msg.content}</MessageResponse>
+                        </div>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  );
+                }
+
                 return (
                   <Message from={item.msg.role} key={item.msg._id}>
                     <MessageContent>
@@ -512,11 +545,58 @@ export function ChatPage() {
           <ConversationScrollButton />
         </Conversation>
 
-        {selectedChat?.status && (
-          <div className="border-t border-border px-4 py-2">
+        {(selectedChat?.status || selectedChat?.sandboxId) && (
+          <div className="flex items-center justify-between border-t border-border px-4 py-2">
             <p className="text-xs text-muted-foreground">
-              {selectedChat.status}
+              {selectedChat?.status ?? ""}
             </p>
+            {selectedChat?.sandboxId && (
+              <div className="flex items-center gap-1">
+                {selectedChat?.sandboxStopped ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={() => {
+                      if (activeChatId) {
+                        startSandbox
+                          .mutateAsync({ chatId: activeChatId })
+                          .catch(console.error);
+                      }
+                    }}
+                    disabled={startSandbox.isPending}
+                  >
+                    {startSandbox.isPending ? (
+                      <Spinner className="size-3" />
+                    ) : (
+                      <Play className="size-3" />
+                    )}
+                    Start
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={() => {
+                      if (activeChatId) {
+                        stopSandbox
+                          .mutateAsync({ chatId: activeChatId })
+                          .catch(console.error);
+                      }
+                    }}
+                    disabled={stopSandbox.isPending}
+                  >
+                    {stopSandbox.isPending ? (
+                      <Spinner className="size-3" />
+                    ) : (
+                      <Pause className="size-3" />
+                    )}
+                    Stop
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -527,7 +607,11 @@ export function ChatPage() {
               <PromptInputBody>
                 <PromptInputTextarea
                   disabled={sendMessage.isPending}
-                  placeholder="Describe your CTF challenge..."
+                  placeholder={
+                    selectedChat?.sandboxStopped
+                      ? "Sandbox is stopped. Send a message to auto-start..."
+                      : "Describe your CTF challenge..."
+                  }
                 />
               </PromptInputBody>
               <PromptInputFooter>

@@ -185,6 +185,13 @@ export async function reconnectToSandbox(
   };
 }
 
+export async function stopSandboxById(sandboxId: string): Promise<void> {
+  const daytona = new Daytona();
+  const sandbox = await daytona.get(sandboxId);
+  await sandbox.stop();
+  console.log(`Sandbox ${sandboxId} stopped`);
+}
+
 export async function deleteSandboxById(sandboxId: string): Promise<void> {
   const daytona = new Daytona();
   const sandbox = await daytona.get(sandboxId);

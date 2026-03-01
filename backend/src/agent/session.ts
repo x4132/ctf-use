@@ -162,7 +162,10 @@ async function consumeEvents(
   const partLatestContent = new Map<string, string>();
   const partCreating = new Map<string, Promise<Id<"chatMessages">>>();
 
-  const handlePartUpdate = (partId: string, content: string, kind: "message" | "tool") => {
+  const partKinds = new Map<string, "message" | "tool" | "reasoning">();
+
+  const handlePartUpdate = (partId: string, content: string, kind: "message" | "tool" | "reasoning") => {
+    partKinds.set(partId, kind);
     partLatestContent.set(partId, content);
 
     const existingMsgId = partMessageIds.get(partId);
@@ -302,6 +305,9 @@ async function consumeEvents(
               });
             }
           }
+        } else if (part.type === "reasoning") {
+          const partId = part.id ?? "reasoning-default";
+          handlePartUpdate(partId, part.text ?? "", "reasoning");
         }
       }
     }
@@ -330,7 +336,7 @@ async function consumeEvents(
             chatId,
             role: "assistant" as const,
             content: latestContent.trim(),
-            kind: "message",
+            kind: partKinds.get(partId) ?? "message",
           }).catch((err) => {
             console.error(`[${chatId}] Failed final content create:`, err);
           }),
