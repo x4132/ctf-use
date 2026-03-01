@@ -20,43 +20,74 @@ function buildSessionHandle(
   sessionId: string,
   chatId: string,
 ): OpenCodeSession {
+  let currentStream: AsyncGenerator<Event> | null = null;
+  let aborted = false;
+
   return {
     sessionId,
 
     async sendMessage(text: string) {
+      aborted = false;
       console.log(`[${chatId}] Sending prompt (${text.length} chars)`);
 
       // Subscribe to events BEFORE sending the prompt to avoid missing early events
       const eventSub = await client.event.subscribe();
+      currentStream = eventSub.stream;
 
-      // Fire the prompt — events will stream in parallel via SSE
-      const promptPromise = client.session.prompt({
-        path: { id: sessionId },
-        body: {
-          parts: [{ type: "text" as const, text }],
-        },
-      });
+      try {
+        // Fire the prompt — events will stream in parallel via SSE
+        const promptPromise = client.session.prompt({
+          path: { id: sessionId },
+          body: {
+            parts: [{ type: "text" as const, text }],
+          },
+        });
 
-      // Consume events until the prompt resolves
-      await consumeEvents(
-        eventSub.stream,
-        sessionId,
-        chatId as Id<"chats">,
-        promptPromise,
-      );
-
-      // Check prompt result for errors
-      const promptResult = await promptPromise as { error?: unknown; data?: unknown };
-      if (promptResult?.error) {
-        throw new Error(
-          `OpenCode prompt failed: ${typeof promptResult.error === "string" ? promptResult.error : JSON.stringify(promptResult.error)}`,
+        // Consume events until the prompt resolves
+        await consumeEvents(
+          eventSub.stream,
+          sessionId,
+          chatId as Id<"chats">,
+          promptPromise,
         );
-      }
 
-      console.log(`[${chatId}] Prompt round complete`);
+        // If we were aborted, don't await the prompt (it may never resolve)
+        if (aborted) {
+          console.log(`[${chatId}] sendMessage exiting early (aborted)`);
+          return;
+        }
+
+        // Check prompt result for errors
+        const promptResult = await promptPromise as { error?: unknown; data?: unknown };
+        if (promptResult?.error) {
+          throw new Error(
+            `OpenCode prompt failed: ${typeof promptResult.error === "string" ? promptResult.error : JSON.stringify(promptResult.error)}`,
+          );
+        }
+
+        console.log(`[${chatId}] Prompt round complete`);
+      } catch (err) {
+        // Suppress errors caused by abort (stream closed, etc.)
+        if (aborted) {
+          console.log(`[${chatId}] sendMessage suppressed error during abort`);
+          return;
+        }
+        throw err;
+      } finally {
+        currentStream = null;
+      }
     },
 
     async abort() {
+      aborted = true;
+
+      // Force-close the SSE event stream to unblock consumeEvents
+      if (currentStream) {
+        try { await currentStream.return(undefined as never); } catch { /* ignore */ }
+        currentStream = null;
+      }
+
+      // Tell OpenCode to stop processing
       try {
         await client.session.abort({ path: { id: sessionId } });
         console.log(`[${chatId}] Session aborted`);

@@ -37,6 +37,10 @@ interface ChatSession {
 const chatSessions = new Map<string, ChatSession>();
 const chatInitializing = new Map<string, Promise<ChatSession>>();
 
+// Tracks chats that were stopped — prevents runLoop from starting after
+// stop is pressed during the first sendMessage (before loop is registered).
+const stoppedChats = new Set<string>();
+
 async function getOrCreateChatSession(
   chatId: string,
   onStatus?: (status: string) => void,
@@ -117,6 +121,9 @@ const chatRouter = t.router({
       const convex = getConvexClient();
       const chatId = input.chatId as Id<"chats">;
 
+      // Clear any previous stop flag so this new send can proceed
+      stoppedChats.delete(input.chatId);
+
       // Persist user message to Convex (moved from frontend to backend for SDK-layer separation)
       await convex.mutation(api.messages.create, {
         chatId,
@@ -186,6 +193,12 @@ const chatRouter = t.router({
       // Send prompt in background — events stream to Convex inside session.sendMessage()
       chatSession.session.sendMessage(prompt)
         .then(async () => {
+          // If stop was pressed during sendMessage, don't start the loop
+          if (stoppedChats.has(input.chatId)) {
+            clearRunning();
+            return;
+          }
+
           // If loop mode, start the iteration loop (iteration 1 just completed)
           if (input.loopEnabled) {
             const maxIter = input.loopMaxIterations ?? 10;
@@ -207,6 +220,11 @@ const chatRouter = t.router({
           }
         })
         .catch(async (err) => {
+          // Suppress errors from abort — stop handler already updated state
+          if (stoppedChats.has(input.chatId)) {
+            clearRunning();
+            return;
+          }
           console.error(`[${input.chatId}] sendMessage failed:`, err);
           const errMsg = err instanceof Error ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
           setStatus(`Error: ${errMsg}`);
@@ -219,6 +237,10 @@ const chatRouter = t.router({
   stop: loggedProcedure
     .input(z.object({ chatId: z.string().min(1) }))
     .mutation(async ({ input }) => {
+      // Mark as stopped — prevents runLoop from starting if sendMessage is
+      // still in-flight when stop is pressed (loop abort race condition).
+      stoppedChats.add(input.chatId);
+
       // Abort loop first (prevents next iteration from starting)
       abortLoop(input.chatId);
 
