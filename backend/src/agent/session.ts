@@ -78,16 +78,16 @@ export async function createOpenCodeSession(
     query: { directory: "/home/daytona" },
   });
   if (sessionResult.error) {
-    console.error(`[${chatId}] opencode session.create error:`, sessionResult.error);
+    console.error(`[${chatId}] agent session.create error:`, sessionResult.error);
     throw new Error(
-      `Failed to create opencode session: ${JSON.stringify(sessionResult.error)}`,
+      `Failed to create agent session: ${JSON.stringify(sessionResult.error)}`,
     );
   }
   const sessionId = sessionResult.data?.id;
   if (!sessionId) {
-    throw new Error("Failed to create opencode session — no session ID returned");
+    throw new Error("Failed to create agent session — no session ID returned");
   }
-  console.log(`[${chatId}] opencode session created: ${sessionId}`);
+  console.log(`[${chatId}] agent session created: ${sessionId}`);
 
   return buildSessionHandle(client, sessionId, chatId);
 }

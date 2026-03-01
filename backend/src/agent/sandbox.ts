@@ -36,15 +36,15 @@ async function startOpenCodeServer(
   });
 
   if (!command.cmdId) {
-    throw new Error("Failed to start opencode server in sandbox");
+    throw new Error("Failed to start Agent server in sandbox");
   }
-  console.log(`[${chatId}] opencode server started (async), cmdId=${command.cmdId}`);
+  console.log(`[${chatId}] Agent server started (async), cmdId=${command.cmdId}`);
 
   await waitForServer(sandbox, sessionId, command.cmdId, chatId);
 
   const preview = await sandbox.getPreviewLink(OPENCODE_PORT);
   const baseUrl = preview.url.replace(/\/$/, "");
-  console.log(`[${chatId}] opencode server ready at ${baseUrl}`);
+  console.log(`[${chatId}] Agent server ready at ${baseUrl}`);
   return baseUrl;
 }
 
@@ -65,11 +65,11 @@ export async function createSandbox(
   console.log(`[${chatId}] Sandbox created: ${sandbox.id}`);
 
   // Install opencode
-  onStatus?.("Installing OpenCode...");
+  onStatus?.("Installing Agent...");
   await sandbox.process.executeCommand(
     `npm i -g opencode-ai@${OPENCODE_VERSION}`,
   );
-  console.log(`[${chatId}] opencode installed`);
+  console.log(`[${chatId}] agent installed`);
 
   // Write opencode config file
   const config = JSON.stringify({
@@ -99,7 +99,7 @@ export async function createSandbox(
   );
   console.log(`[${chatId}] opencode config written`);
 
-  onStatus?.("Starting OpenCode server...");
+  onStatus?.("Starting Agent server...");
   const baseUrl = await startOpenCodeServer(sandbox, chatId);
 
   // Authenticate with Amazon Bedrock (equivalent to /connect)
@@ -155,10 +155,10 @@ export async function reconnectToSandbox(
 
   const alive = await isOpenCodeAlive(baseUrl);
   if (alive) {
-    console.log(`[${chatId}] OpenCode server already running at ${baseUrl}`);
+    console.log(`[${chatId}] Agent server already running at ${baseUrl}`);
   } else {
-    console.log(`[${chatId}] OpenCode server not responding, restarting...`);
-    onStatus?.("Restarting OpenCode server...");
+    console.log(`[${chatId}] Agent server not responding, restarting...`);
+    onStatus?.("Restarting Agent server...");
     baseUrl = await startOpenCodeServer(sandbox, chatId);
   }
   console.log(`[${chatId}] Reconnected to sandbox at ${baseUrl}`);
@@ -222,5 +222,5 @@ async function waitForServer(
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
-  throw new Error(`[${chatId}] Timed out waiting for opencode server to become ready`);
+  throw new Error(`[${chatId}] Timed out waiting for agent server to become ready`);
 }
